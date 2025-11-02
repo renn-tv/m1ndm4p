@@ -50,6 +50,7 @@ class MindmapApp(App[None]):
         Binding("e", "edit_node", "(edit)"),
         Binding("a", "expand_all", "Expand All"),
         Binding("1", "generate_children(1)", "(AI nodes)", key_display="1-9"),
+        Binding("?", "auto_generate_children", "(AI auto)"),
     ] + [
         Binding(str(i), f"generate_children({i})", "(AI nodes)", show=False)
         for i in range(2, 10)
@@ -126,7 +127,7 @@ class MindmapApp(App[None]):
         return selected.data if selected else None
 
     def _format_node_label(self, node: MindmapNode) -> Text:
-        return Text(node.title, style="bold")
+        return Text(node.title)
 
     @staticmethod
     def _body_lines(body: str) -> list[str]:
@@ -141,6 +142,27 @@ class MindmapApp(App[None]):
         if not lines:
             lines.append("")
         return lines
+
+    def _apply_generated_children(
+        self,
+        tree_node: Tree.Node[MindmapNode],
+        model_node: MindmapNode,
+        child_titles: list[str],
+    ) -> int:
+        tree = self.require_tree()
+        model_node.children = []
+        for child in list(tree_node.children):
+            child.remove()
+        child_level = self._tree_node_level(tree_node) + 1
+        for index, title in enumerate(child_titles, start=1):
+            clean_title = title.strip() or f"Level {child_level} Node {index}"
+            new_model = MindmapNode(clean_title)
+            model_node.children.append(new_model)
+            new_tree_node = tree_node.add(self._format_node_label(new_model), data=new_model)
+            new_tree_node.expand()
+        tree_node.expand()
+        tree.refresh(layout=True)
+        return child_level
 
     def _start_inline_edit(
         self,
@@ -183,11 +205,11 @@ class MindmapApp(App[None]):
                 tree_node.set_label(Text(display + caret, style="dim italic"))
         else:
             if select_all and not buffer:
-                highlight = Text(initial or "", style="reverse bold")
-                highlight.append(caret, style="bold")
+                highlight = Text(initial or "", style="reverse")
+                highlight.append(caret)
                 tree_node.set_label(highlight)
             else:
-                tree_node.set_label(Text((buffer or initial) + caret, style="bold"))
+                tree_node.set_label(Text((buffer or initial) + caret))
         self.require_tree().refresh(layout=True)
 
     def _handle_edit_key(self, event: events.Key) -> None:
@@ -322,22 +344,53 @@ class MindmapApp(App[None]):
         finally:
             spinner_timer.stop()
             spinner_node.remove()
+            tree.refresh(layout=True)
         if not child_titles:
             self.show_status("No child titles returned.")
             return
-        model_node.children = []
-        for child in list(selected_tree_node.children):
-            child.remove()
-        child_level = self._tree_node_level(selected_tree_node) + 1
-        for index, title in enumerate(child_titles, start=1):
-            clean_title = title.strip() or f"Level {child_level} Node {index}"
-            new_model = MindmapNode(clean_title)
-            model_node.children.append(new_model)
-            new_tree_node = selected_tree_node.add(self._format_node_label(new_model), data=new_model)
-            new_tree_node.expand()
-        selected_tree_node.expand()
+        child_level = self._apply_generated_children(selected_tree_node, model_node, child_titles)
         self.show_status(
-            f"Generated {count} child{'ren' if count != 1 else ''} at level {child_level}."
+            f"Generated {len(child_titles)} child{'ren' if len(child_titles) != 1 else ''} at level {child_level}."
+        )
+
+    async def action_auto_generate_children(self) -> None:
+        selected_tree_node = self.get_selected_tree_node()
+        if selected_tree_node is None or selected_tree_node.data is None:
+            self.bell()
+            self.show_status("No node selected.")
+            return
+        model_node = selected_tree_node.data
+        context = to_markdown(self.mindmap_root)
+        tree = self.require_tree()
+        spinner_frames = ["  .", "  ..", "  ..."]
+        spinner_index = 0
+        spinner_node = selected_tree_node.add_leaf(Text(spinner_frames[0], style="dim italic"))
+        selected_tree_node.expand()
+        tree.refresh(layout=True)
+
+        def tick() -> None:
+            nonlocal spinner_index
+            spinner_index = (spinner_index + 1) % len(spinner_frames)
+            spinner_node.set_label(Text(spinner_frames[spinner_index], style="dim italic"))
+            tree.refresh(layout=False)
+
+        spinner_timer = self.set_interval(0.25, tick)
+        try:
+            child_titles = await asyncio.to_thread(
+                ai.generate_children_auto, model_node.title, context_markdown=context
+            )
+        except Exception as exc:  # pragma: no cover - defensive programming
+            self.handle_ai_error("generate child nodes", exc)
+            child_titles = []
+        finally:
+            spinner_timer.stop()
+            spinner_node.remove()
+        if not child_titles:
+            self.show_status("No child titles returned.")
+            return
+        child_level = self._apply_generated_children(selected_tree_node, model_node, child_titles)
+        self.show_status(
+            f"Generated {len(child_titles)} AI-selected child{'ren' if len(child_titles) != 1 else ''} at level {child_level}."
         )
 
     def action_expand_all(self) -> None:
@@ -415,6 +468,7 @@ class MindmapApp(App[None]):
         finally:
             spinner_timer.stop()
             spinner_node.remove()
+            tree.refresh(layout=True)
         paragraph = paragraph.strip()
         if not paragraph:
             self.show_status("No text returned.")
@@ -449,11 +503,16 @@ class MindmapApp(App[None]):
             if 0 <= line_index < len(lines):
                 del lines[line_index]
                 parent_node.body = "\n".join(lines).strip()
-            parent_tree_node = selected_tree_node.parent or self.require_tree().root
+            parent_tree_node = selected_tree_node.parent or tree.root
             self.populate_tree(parent_tree_node, parent_node)
             parent_tree_node.expand()
             tree.refresh(layout=True)
-            tree.select_node(parent_tree_node)
+            children_nodes = list(parent_tree_node.children)
+            text_child_index = len(parent_node.children) + min(line_index, len(lines) - 1)
+            if 0 <= text_child_index < len(children_nodes):
+                tree.select_node(children_nodes[text_child_index])
+            else:
+                tree.select_node(parent_tree_node)
             self.show_status("Text line deleted.")
             return
         if isinstance(node_data, MindmapNode):

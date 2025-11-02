@@ -82,6 +82,29 @@ def generate_children(node_title: str, n: int, context_markdown: str | None = No
     return lines[:n]
 
 
+def generate_children_auto(node_title: str, context_markdown: str | None = None) -> list[str]:
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        return generate_children(node_title, 3, context_markdown=context_markdown)
+
+    context = f"\n\nContext:\n{context_markdown}" if context_markdown else ""
+    prompt = (
+        "Based on the existing mind map, suggest a sensible set of child nodes for '{title}'. "
+        "Return between 2 and 6 concise titles that add meaningful detail. "
+        "List each title on its own line with no numbering, bullets, or commentary.{context}"
+    ).format(title=node_title, context=context)
+
+    result = _call_openrouter(prompt)
+    if not result:
+        return generate_children(node_title, 3, context_markdown=context_markdown)
+
+    lines = [line.strip() for line in result.splitlines() if line.strip()]
+    filtered = [line for line in lines if line.lower() != "none"]
+    if not filtered:
+        return generate_children(node_title, 3, context_markdown=context_markdown)
+    return filtered[:6]
+
+
 def generate_paragraph(node_title: str, context_markdown: str | None = None) -> str:
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:

@@ -1,41 +1,53 @@
-# Simulation Hypthesis
+# Bicycles
 
-## Evidence of simulated physics
+## Road Bikes
 
-## Quantum computational signatures
+### Frame Materials
 
-## Bostrom's trilemma
+#### Steel
 
-### Extinction before technological maturity
+#### Aluminum
 
-#### Astronomical catastrophe
+#### Carbon Fiber
 
-Astronomical catastrophes—like supernovae, gamma‑ray bursts, or asteroid impacts—could wipe out humanity before we achieve the tech needed for ancestor simulations, capping simulation likelihood.
+#### Titanium
 
-#### Ecological collapse
+#### Chromoly
 
-Ecological collapse—climate tipping, biosphere loss, and cascading resource stress—could prematurely end civilization, eliminating the tech and stability needed for ancestor simulations, shrinking simulated‑reality likelihood.
+#### Composite
 
-#### Self‑inflicted nuclear war
+### Gear Systems
 
-#### Resource depletion
+#### Derailleur Systems
 
-#### Emergent AI/nanotech
+#### Hub Gears
 
-### Post‑human disinterest in ancestor‑simulations
+#### Gear Ratios & Range
 
-### Emulation of ancestral experiences
+#### Shifting Mechanisms
 
-### Observer self‑selection and simulation likelihood
+#### Chainrings & Cassettes
 
-## Fine‑tuning arguments
+#### Single vs Multi-Speed
 
-## Virtual reality parallels
+##### Simplicity & Maintenance
 
-## Simulation granularity
+By dropping derailleurs, shifters, and extra gears, a single‑speed drivetrain reduces parts and cleaning effort, cutting maintenance time and cost—ideal for flat‑riding cyclists who value simplicity.
 
-## Digital consciousness models
+##### Weight & Cost
 
-## Cosmic background anomalies
+##### Terrain Flexibility
 
-## Post‑singularity dynamics
+##### Gear Range & Performance
+
+### Fit & Geometry
+
+## Mountain Bikes
+
+## Electric Bikes
+
+## Components
+
+## Maintenance
+
+## Safety & Accessories

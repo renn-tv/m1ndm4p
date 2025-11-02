@@ -2,13 +2,13 @@
 
 ## Overview
 - Terminal mind‑mapping tool built on [Textual](https://textual.textualize.io/); renders Markdown-backed trees and keeps the file (`mindmap.md`) as the single source of truth.
-- Node titles are bold; body text is split into 40-character lines and rendered as indented grey children. Markdown export preserves the original paragraphs.
+- Node titles are rendered plainly; body text is split into 40-character lines and shown as indented grey children. Markdown export preserves the original paragraphs.
 - AI hooks (`ai.generate_children`, `ai.generate_paragraph`) are stubbed to local helpers when API access is unavailable; workflow still functions with deterministic mock text.
 
 ## Features
 - Single-source Markdown mind map that stays in sync with the TUI.
 - Inline editing for node titles and wrapped text lines (no modal popups).
-- AI-assisted idea generation via OpenRouter (child nodes + body text).
+- AI-assisted idea generation via OpenRouter (child nodes + body text). Auto mode (`?`) lets the model pick a sensible number of children.
 - Instant `.`, `..`, `...` spinner feedback during remote calls.
 - Keyboard-only workflow with fast child generation (`1`–`9`), text creation (`t`), editing (`e`), and clearing (`0`).
 
@@ -30,6 +30,7 @@
 
 ## Key Bindings
 - `1`–`9`: generate child nodes (count = key).
+- `?`: let the AI pick a sensible number of child nodes.
 - `t`: generate placeholder body text for the selected node.
 - `e`: inline edit (node titles or text lines). Existing text highlights; typing replaces it.  
   - `Enter` saves, staying on the row.  
