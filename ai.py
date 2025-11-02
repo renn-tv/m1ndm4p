@@ -89,8 +89,8 @@ def generate_paragraph(node_title: str, context_markdown: str | None = None) -> 
 
     context = f"\n\nContext:\n{context_markdown}" if context_markdown else ""
     prompt = (
-        "Write a single concise paragraph for the mind map node titled '{title}'. "
-        "Avoid headings or lists.{context}"
+        "Write a single concise paragraph (~200 characters) for the mind map node titled '{title}'. "
+        "Avoid headings or lists and keep the tone informative.{context}"
     ).format(title=node_title, context=context)
 
     result = _call_openrouter(prompt)
