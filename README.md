@@ -5,6 +5,13 @@
 - Node titles are bold; body text is split into 40-character lines and rendered as indented grey children. Markdown export preserves the original paragraphs.
 - AI hooks (`ai.generate_children`, `ai.generate_paragraph`) are stubbed to local helpers when API access is unavailable; workflow still functions with deterministic mock text.
 
+## Features
+- Single-source Markdown mind map that stays in sync with the TUI.
+- Inline editing for node titles and wrapped text lines (no modal popups).
+- AI-assisted idea generation via OpenRouter (child nodes + body text).
+- Instant `.`, `..`, `...` spinner feedback during remote calls.
+- Keyboard-only workflow with fast child generation (`1`–`9`), text creation (`t`), editing (`e`), and clearing (`0`).
+
 ## Run
 1. Activate the virtualenv (`source .venv/bin/activate`).
 2. Launch the TUI: `python app.py`.
