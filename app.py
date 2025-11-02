@@ -49,14 +49,14 @@ class MindmapApp(App[None]):
     def __init__(self) -> None:
         super().__init__()
         self.body_panel: Optional[Static] = None
-        self.tree_widget: Optional[MindmapTree] = None
+        self.tree: Optional[MindmapTree] = None
         self.mindmap_root = MindmapNode("Central Idea")
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Horizontal():
             tree = MindmapTree("Mind Map", id="mindmap-tree", show_root=True)
-            self.tree_widget = tree
+            self.tree = tree
             yield tree
             body_panel = Static(id="body-panel")
             self.body_panel = body_panel
@@ -77,9 +77,9 @@ class MindmapApp(App[None]):
         self.update_body_panel(self.mindmap_root)
 
     def require_tree(self) -> MindmapTree:
-        if self.tree_widget is None:
+        if self.tree is None:
             raise RuntimeError("Tree widget not initialised")
-        return self.tree_widget
+        return self.tree
 
     def require_body_panel(self) -> Static:
         if self.body_panel is None:
