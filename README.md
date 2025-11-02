@@ -10,6 +10,17 @@
 2. Launch the TUI: `python app.py`.
 3. Keep `mindmap.md` in the project root—`o` reloads it and expands the whole tree automatically.
 
+### Optional: Enable OpenRouter AI
+- Create an account at [openrouter.ai](https://openrouter.ai/) and obtain an API key.
+- Export the key before launching the app  
+  ```bash
+  export OPENROUTER_API_KEY="sk-..."
+  # optional model override
+  export OPENROUTER_MODEL="minimax/minimax-chat"
+  ```
+- Install `requests` in the virtualenv (`pip install requests`).
+- With the key present, `1`–`9` and `t` call OpenRouter; without it, the app falls back to deterministic mock text.
+
 ## Key Bindings
 - `1`–`9`: generate child nodes (count = key).
 - `t`: generate placeholder body text for the selected node.
@@ -24,7 +35,7 @@
 
 ## Editing Behaviour
 - Text lines are stored per node in `MindmapNode.body`; inline edits rebuild the wrapped lines while keeping focus on the edited entry.
-- Titles persist truncation rules (200-char cap on generated text), ensuring the Markdown output remains manageable.
+- AI paragraphs target roughly 200 characters, but the full response is kept (wrapped at 40 chars for display) so longer context is preserved in Markdown.
 
 ## Markdown Format
 ```

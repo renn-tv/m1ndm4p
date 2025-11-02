@@ -1,30 +1,41 @@
-# Central Idea
+# Simulation Hypthesis
 
-## Level 1 Node 1
+## Evidence of simulated physics
 
-## edit
+## Quantum computational signatures
 
-## edit
+## Bostrom's trilemma
 
-### Level 2 Node 1
+### Extinction before technological maturity
 
-edit
-Debug text 2 for mind wrapping.
+#### Astronomical catastrophe
 
-### Level 2 Node 2
+Astronomical catastrophes—like supernovae, gamma‑ray bursts, or asteroid impacts—could wipe out humanity before we achieve the tech needed for ancestor simulations, capping simulation likelihood.
 
-### Level 2 Node 3
+#### Ecological collapse
 
-edit
-Debug text 2 for mind wrapping.
+Ecological collapse—climate tipping, biosphere loss, and cascading resource stress—could prematurely end civilization, eliminating the tech and stability needed for ancestor simulations, shrinking simulated‑reality likelihood.
 
-### Level 2 Node 4
+#### Self‑inflicted nuclear war
 
-### Level 2 Node 5
+#### Resource depletion
 
-## Level 1 Node 4
+#### Emergent AI/nanotech
 
-## Level 1 Node 5
+### Post‑human disinterest in ancestor‑simulations
 
-Debug text 1 for mind wrapping.
-Debug text 2 for mind wrapping.
+### Emulation of ancestral experiences
+
+### Observer self‑selection and simulation likelihood
+
+## Fine‑tuning arguments
+
+## Virtual reality parallels
+
+## Simulation granularity
+
+## Digital consciousness models
+
+## Cosmic background anomalies
+
+## Post‑singularity dynamics

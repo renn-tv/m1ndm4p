@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import asyncio
 import textwrap
 from typing import Optional
 
@@ -13,6 +14,7 @@ from rich.text import Text
 
 from md_io import from_markdown, to_markdown
 from models import MindmapNode
+import ai
 
 
 class MindmapTree(Tree[MindmapNode]):
@@ -26,6 +28,8 @@ class MindmapTree(Tree[MindmapNode]):
 
 class MindmapApp(App[None]):
     """Textual user interface for the Markdown-backed mind map."""
+
+    TITLE = "m1ndm4p"
 
     CSS = """
     #mindmap-tree {
@@ -53,6 +57,7 @@ class MindmapApp(App[None]):
 
     def __init__(self) -> None:
         super().__init__()
+        self.title = "m1ndm4p"
         self._tree_widget: Optional[MindmapTree] = None
         self.mindmap_root = MindmapNode("Central Idea")
         self._edit_state: Optional[dict[str, object]] = None
@@ -282,11 +287,7 @@ class MindmapApp(App[None]):
             current = current.parent
         return level
 
-    @staticmethod
-    def _mock_paragraph(node_title: str) -> str:
-        return "Debug text 1 for mind wrapping.\nDebug text 2 for mind wrapping."
-
-    def action_generate_children(self, count: int) -> None:
+    async def action_generate_children(self, count: int) -> None:
         selected_tree_node = self.get_selected_tree_node()
         if selected_tree_node is None or selected_tree_node.data is None:
             self.bell()
@@ -296,13 +297,41 @@ class MindmapApp(App[None]):
             self.show_status("Count must be positive.")
             return
         model_node = selected_tree_node.data
+        context = to_markdown(self.mindmap_root)
+        tree = self.require_tree()
+        spinner_frames = ["  .", "  ..", "  ..."]
+        spinner_index = 0
+        spinner_node = selected_tree_node.add_leaf(Text(spinner_frames[0], style="dim italic"))
+        selected_tree_node.expand()
+        tree.refresh(layout=True)
+
+        def tick() -> None:
+            nonlocal spinner_index
+            spinner_index = (spinner_index + 1) % len(spinner_frames)
+            spinner_node.set_label(Text(spinner_frames[spinner_index], style="dim italic"))
+            tree.refresh(layout=False)
+
+        spinner_timer = self.set_interval(0.25, tick)
+        try:
+            child_titles = await asyncio.to_thread(
+                ai.generate_children, model_node.title, count, context_markdown=context
+            )
+        except Exception as exc:  # pragma: no cover - defensive programming
+            self.handle_ai_error("generate child nodes", exc)
+            child_titles = []
+        finally:
+            spinner_timer.stop()
+            spinner_node.remove()
+        if not child_titles:
+            self.show_status("No child titles returned.")
+            return
         model_node.children = []
         for child in list(selected_tree_node.children):
             child.remove()
         child_level = self._tree_node_level(selected_tree_node) + 1
-        for index in range(1, count + 1):
-            title = f"Level {child_level} Node {index}"
-            new_model = MindmapNode(title)
+        for index, title in enumerate(child_titles, start=1):
+            clean_title = title.strip() or f"Level {child_level} Node {index}"
+            new_model = MindmapNode(clean_title)
             model_node.children.append(new_model)
             new_tree_node = selected_tree_node.add(self._format_node_label(new_model), data=new_model)
             new_tree_node.expand()
@@ -354,16 +383,43 @@ class MindmapApp(App[None]):
             context={"node": data},
         )
 
-    def action_generate_body(self) -> None:
+    async def action_generate_body(self) -> None:
         selected_tree_node = self.get_selected_tree_node()
         if selected_tree_node is None or selected_tree_node.data is None:
             self.bell()
             self.show_status("No node selected.")
             return
         model_node = selected_tree_node.data
-        paragraph = self._mock_paragraph(model_node.title).strip()
-        stored_text = paragraph[:200].strip()
-        model_node.body = stored_text
+        context = to_markdown(self.mindmap_root)
+        tree = self.require_tree()
+        spinner_frames = ["  .", "  ..", "  ..."]
+        spinner_index = 0
+        spinner_node = selected_tree_node.add_leaf(Text(spinner_frames[0], style="dim italic"))
+        selected_tree_node.expand()
+        tree.refresh(layout=True)
+
+        def tick() -> None:
+            nonlocal spinner_index
+            spinner_index = (spinner_index + 1) % len(spinner_frames)
+            spinner_node.set_label(Text(spinner_frames[spinner_index], style="dim italic"))
+            tree.refresh(layout=False)
+
+        spinner_timer = self.set_interval(0.25, tick)
+        try:
+            paragraph = await asyncio.to_thread(
+                ai.generate_paragraph, model_node.title, context_markdown=context
+            )
+        except Exception as exc:  # pragma: no cover - defensive programming
+            self.handle_ai_error("generate paragraph", exc)
+            return
+        finally:
+            spinner_timer.stop()
+            spinner_node.remove()
+        paragraph = paragraph.strip()
+        if not paragraph:
+            self.show_status("No text returned.")
+            return
+        model_node.body = paragraph
         line_count = len(self._body_lines(model_node.body))
         self.populate_tree(selected_tree_node, model_node)
         selected_tree_node.expand()
@@ -384,18 +440,34 @@ class MindmapApp(App[None]):
             self.bell()
             self.show_status("No node selected.")
             return
-        if selected_tree_node.data is self.mindmap_root:
-            self.bell()
-            self.show_status("Cannot delete the root node.")
+        tree = self.require_tree()
+        node_data = selected_tree_node.data
+        if isinstance(node_data, dict) and node_data.get("kind") == "body_line":
+            parent_node = node_data["node"]
+            line_index = node_data["index"]
+            lines = self._body_lines(parent_node.body or "")
+            if 0 <= line_index < len(lines):
+                del lines[line_index]
+                parent_node.body = "\n".join(lines).strip()
+            parent_tree_node = selected_tree_node.parent or self.require_tree().root
+            self.populate_tree(parent_tree_node, parent_node)
+            parent_tree_node.expand()
+            tree.refresh(layout=True)
+            tree.select_node(parent_tree_node)
+            self.show_status("Text line deleted.")
             return
-        parent_model = self.find_parent(self.mindmap_root, selected_tree_node.data)
-        if parent_model is None:
-            self.bell()
-            self.show_status("Parent not found; nothing deleted.")
+        if isinstance(node_data, MindmapNode):
+            node_data.body = None
+            node_data.children = []
+            for child in list(selected_tree_node.children):
+                child.remove()
+            selected_tree_node.set_label(self._format_node_label(node_data))
+            tree.refresh(layout=True)
+            tree.select_node(selected_tree_node)
+            self.show_status("Node cleared.")
             return
-        parent_model.children = [child for child in parent_model.children if child is not selected_tree_node.data]
-        selected_tree_node.remove()
-        self.show_status("Node deleted.")
+        self.bell()
+        self.show_status("Nothing deleted.")
 
     def action_save(self) -> None:
         markdown = to_markdown(self.mindmap_root)
