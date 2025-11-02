@@ -1,5 +1,7 @@
 # AI powered Mind Map creation in Terminal.
 
+![m1ndm4p demo](m1ndm4p.gif)
+
 ## Overview
 - Terminal mind‑mapping tool built on [Textual](https://textual.textualize.io/); renders Markdown-backed trees and keeps the file (`mindmap.md`) as the single source of truth.
 - Node titles are rendered plainly; body text is split into 40-character lines and shown as indented grey children. Markdown export preserves the original paragraphs.
