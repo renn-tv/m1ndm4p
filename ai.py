@@ -1,15 +1,13 @@
 import json
 import os
-from typing import Optional
-
-try:
-    import requests
-except ImportError:  # pragma: no cover - dependency advisory
-    requests = None
-    print("The 'requests' library is required for OpenRouter access. Please install it to enable AI features.")
+import re
+from collections import defaultdict
+from typing import DefaultDict, Optional
+from urllib import error, request
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-AVAILABLE_MODELS = [
+OFFLINE_MODEL = "No AI (offline dummy output)"
+_NETWORK_MODELS = [
     "alibaba/tongyi-deepresearch-30b-a3b:free",
     "google/gemma-3-4b-it:free",
     "google/gemma-3-12b-it:free",
@@ -27,7 +25,10 @@ AVAILABLE_MODELS = [
     "tngtech/deepseek-r1t2-chimera:free",
     "z-ai/glm-4.5-air:free",
 ]
-DEFAULT_MODEL = AVAILABLE_MODELS[0]
+AVAILABLE_MODELS = [OFFLINE_MODEL, *_NETWORK_MODELS]
+DEFAULT_MODEL = _NETWORK_MODELS[0]
+_dummy_generation = 0
+_dummy_counters: DefaultDict[tuple[str, int, int], int] = defaultdict(int)
 
 
 def get_active_model() -> str:
@@ -36,10 +37,50 @@ def get_active_model() -> str:
 
 def set_active_model(model: str) -> None:
     os.environ["OPENROUTER_MODEL"] = model
+    reset_dummy_counters()
+
+
+def reset_dummy_counters() -> None:
+    global _dummy_generation
+    _dummy_generation += 1
+    _dummy_counters.clear()
+
+
+def _infer_level_from_context(node_title: str, context_markdown: str | None) -> int:
+    if not context_markdown:
+        return 1
+    heading_pattern = re.compile(r"^(#+)\s+(.*)\s*$")
+    for line in context_markdown.splitlines():
+        match = heading_pattern.match(line)
+        if not match:
+            continue
+        hashes, title = match.groups()
+        if title.strip() == node_title.strip():
+            return max(len(hashes), 1)
+    return 1
+
+
+def _dummy_child_title(level: int) -> str:
+    key = (get_active_model(), _dummy_generation, level)
+    _dummy_counters[key] += 1
+    return f"Level {level}, Node {_dummy_counters[key]}"
+
+
+def _sync_dummy_counter(level: int, context_markdown: str | None) -> None:
+    key = (get_active_model(), _dummy_generation, level)
+    baseline = 0
+    if context_markdown:
+        pattern = re.compile(rf"Level {level}, Node (\d+)")
+        matches = [int(match) for match in pattern.findall(context_markdown)]
+        if matches:
+            baseline = max(matches)
+    # Only update if the stored counter is lower than the baseline
+    if _dummy_counters[key] < baseline:
+        _dummy_counters[key] = baseline
 
 
 def _post_openrouter(model: str, messages: list[dict]) -> Optional[dict]:
-    if requests is None:
+    if model == OFFLINE_MODEL:
         return None
 
     api_key = os.getenv("OPENROUTER_API_KEY")
@@ -55,15 +96,25 @@ def _post_openrouter(model: str, messages: list[dict]) -> Optional[dict]:
         "messages": messages,
     }
 
+    data = json.dumps(body).encode("utf-8")
+    http_request = request.Request(
+        OPENROUTER_API_URL,
+        data=data,
+        headers=headers,
+        method="POST",
+    )
     try:
-        response = requests.post(OPENROUTER_API_URL, headers=headers, data=json.dumps(body), timeout=30)
-        response.raise_for_status()
-    except requests.RequestException:
+        with request.urlopen(http_request, timeout=30) as response:
+            status = getattr(response, "status", 200)
+            if not 200 <= status < 300:
+                return None
+            payload = response.read().decode("utf-8")
+    except (error.URLError, error.HTTPError, TimeoutError):
         return None
 
     try:
-        return response.json()
-    except ValueError:
+        return json.loads(payload)
+    except json.JSONDecodeError:
         return None
 
 
@@ -86,10 +137,28 @@ def _call_openrouter(prompt: str) -> Optional[str]:
     return _extract_text(response)
 
 
-def generate_children(node_title: str, n: int, context_markdown: str | None = None) -> list[str]:
+def _reset_level_counter(level: int) -> None:
+    key = (get_active_model(), _dummy_generation, level)
+    _dummy_counters[key] = 0
+
+
+def generate_children(
+    node_title: str,
+    n: int,
+    context_markdown: str | None = None,
+    *,
+    reset_counter: bool = False,
+) -> list[str]:
     api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key or n <= 0:
-        return [f"{node_title} idea {i + 1}" for i in range(n)]
+    active_model = get_active_model()
+    uses_network = bool(api_key) and active_model != OFFLINE_MODEL
+    level = _infer_level_from_context(node_title, context_markdown)
+    if not uses_network or n <= 0:
+        if reset_counter:
+            _reset_level_counter(level)
+        else:
+            _sync_dummy_counter(level, context_markdown)
+        return [_dummy_child_title(level) for _ in range(n)]
 
     context = f"\n\nContext:\n{context_markdown}" if context_markdown else ""
     prompt = (
@@ -100,18 +169,33 @@ def generate_children(node_title: str, n: int, context_markdown: str | None = No
 
     result = _call_openrouter(prompt)
     if not result:
-        return [f"{node_title} idea {i + 1}" for i in range(n)]
+        if reset_counter:
+            _reset_level_counter(level)
+        else:
+            _sync_dummy_counter(level, context_markdown)
+        return [_dummy_child_title(level) for _ in range(n)]
 
     lines = [line.strip() for line in result.splitlines() if line.strip()]
     if len(lines) < n:
-        lines.extend(f"{node_title} idea {i + 1}" for i in range(len(lines), n))
+        if reset_counter:
+            _reset_level_counter(level)
+        else:
+            _sync_dummy_counter(level, context_markdown)
+        lines.extend(_dummy_child_title(level) for _ in range(len(lines), n))
     return lines[:n]
 
 
 def generate_children_auto(node_title: str, context_markdown: str | None = None) -> list[str]:
     api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        return generate_children(node_title, 3, context_markdown=context_markdown)
+    active_model = get_active_model()
+    uses_network = bool(api_key) and active_model != OFFLINE_MODEL
+    if not uses_network:
+        return generate_children(
+            node_title,
+            3,
+            context_markdown=context_markdown,
+            reset_counter=True,
+        )
 
     context = f"\n\nContext:\n{context_markdown}" if context_markdown else ""
     prompt = (
@@ -122,7 +206,12 @@ def generate_children_auto(node_title: str, context_markdown: str | None = None)
 
     result = _call_openrouter(prompt)
     if not result:
-        return generate_children(node_title, 3, context_markdown=context_markdown)
+        return generate_children(
+            node_title,
+            3,
+            context_markdown=context_markdown,
+            reset_counter=True,
+        )
 
     lines = [line.strip() for line in result.splitlines() if line.strip()]
     filtered = [line for line in lines if line.lower() != "none"]

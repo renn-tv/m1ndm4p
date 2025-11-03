@@ -8,7 +8,7 @@
 - AI helpers run through OpenRouter when an API key is present, but deterministic fallbacks keep the tool useful offline.
 
 ## Highlights
-- **Model palette (`m`)**: swap between curated free OpenRouter models without leaving the terminal; the active choice is always in the status bar.
+- **Model palette (`m`)**: swap between curated free OpenRouter models or the built-in “No AI (offline dummy output)” entry; the active choice is always in the status bar.
 - **Incremental ideation (`+` / `-`)**: ask the AI for *one more* child or prune the last one to fine-tune a branch without regenerating everything.
 - **Full build (`f` → digit)**: recursively populate a subtree `n` levels deep with AI-chosen children, keeping focus on the node that initiated the action.
 - **Leaf narration (`f` → `t`)**: after expanding a branch, instantly request text for every leaf so you can watch paragraphs appear live.
@@ -28,7 +28,7 @@
   # optional: choose a different default model
   export OPENROUTER_MODEL="minimax/minimax-chat"
   ```
-- Install `requests` in the virtualenv (`pip install requests`).
+- No extra Python packages are required—the app ships with a lightweight HTTP client.
 - With the key present, AI shortcuts hit OpenRouter; otherwise the tool falls back to predictable mock suggestions.
 
 ## Key Bindings
@@ -36,7 +36,7 @@
 - Generation: `1`–`9` add that many children; `?` lets the AI decide; `+` requests one more child; `-` removes the last child.
 - Content: `t` writes body text for the selected node; `f` followed by a digit performs a full multi-level build; `f` followed by `t` writes text for every leaf under the current node.
 - Editing: `e` toggles inline edit (`Enter` saves, `Esc` cancels); `0` clears the current node (body + children).
-- Data management: `o` reloads `mindmap.md`; `s` saves; `m` opens the model selector palette.
+- Data management: `o` reloads `mindmap.md`; `s` saves; `m` opens the model selector palette (including the offline “No AI” toggle).
 
 ## Editing Behaviour
 - Text lines are stored per node in `MindmapNode.body`; inline edits rebuild the wrapped lines while keeping focus on the edited entry.

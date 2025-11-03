@@ -168,6 +168,7 @@ class MindmapApp(App[None]):
         self.show_status("Ready")
 
     def rebuild_tree(self) -> None:
+        ai.reset_dummy_counters()
         tree = self.require_tree()
         tree.clear()
         root_node = tree.root
@@ -844,7 +845,11 @@ class MindmapApp(App[None]):
         spinner_timer = self.set_interval(0.25, tick)
         try:
             child_titles = await asyncio.to_thread(
-                ai.generate_children, model_node.title, count, context_markdown=context
+                ai.generate_children,
+                model_node.title,
+                count,
+                context_markdown=context,
+                reset_counter=True,
             )
         except Exception as exc:  # pragma: no cover - defensive programming
             self.handle_ai_error("generate child nodes", exc)
