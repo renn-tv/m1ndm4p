@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 import textwrap
-from typing import Optional
+from typing import Callable, Optional
 
 from textual import events
 from textual.app import App, ComposeResult
@@ -12,7 +12,7 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Footer, Header, OptionList, Static, Tree
 from textual.widgets.option_list import Option, OptionDoesNotExist
-from textual.widgets._tree import TextType
+from textual.widgets._tree import TextType, TreeNode, UnknownNodeID
 from rich.text import Text
 
 from md_io import from_markdown, to_markdown
@@ -131,6 +131,7 @@ class MindmapApp(App[None]):
         Binding("a", "expand_all", "Expand All"),
         Binding("+", "add_child_suggestion", "(child +)"),
         Binding("-", "remove_child_suggestion", "(child -)"),
+        Binding("f", "full_generate", "(full)"),
         Binding("m", "choose_model", "Model"),
         Binding("1", "generate_children(1)", "(AI nodes)", key_display="1-9"),
         Binding("?", "auto_generate_children", "(AI auto)"),
@@ -151,6 +152,8 @@ class MindmapApp(App[None]):
             self.model_choices.append(self.selected_model)
             self.model_choices.sort()
         ai.set_active_model(self.selected_model)
+        self._full_pending: Optional[dict[str, object]] = None
+        self._full_in_progress = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -434,6 +437,259 @@ class MindmapApp(App[None]):
             self.call_after_refresh(_restore_auto_expand)
         tree.select_node(node)
 
+    async def _generate_body_for_node(
+        self,
+        tree_node: Tree.Node[MindmapNode],
+        model_node: MindmapNode,
+    ) -> None:
+        context = to_markdown(self.mindmap_root)
+        paragraph = await self._call_ai_with_spinner(
+            tree_node,
+            "generate paragraph",
+            ai.generate_paragraph,
+            model_node.title,
+            context_markdown=context,
+        )
+        if not isinstance(paragraph, str):
+            self.show_status(f"No text returned for {model_node.title}.")
+            return
+        paragraph = paragraph.strip()
+        if not paragraph:
+            self.show_status(f"No text returned for {model_node.title}.")
+            return
+        model_node.body = paragraph
+        self.populate_tree(tree_node, model_node)
+        tree_node.expand_all()
+        tree = self.require_tree()
+        self._select_tree_node_without_toggle(tree_node)
+        tree.refresh(layout=True)
+
+    def _gather_leaf_nodes(
+        self,
+        root_tree_node: Tree.Node[MindmapNode],
+    ) -> list[tuple[Tree.Node[MindmapNode], MindmapNode]]:
+        leaves: list[tuple[Tree.Node[MindmapNode], MindmapNode]] = []
+        stack: list[Tree.Node[MindmapNode]] = [root_tree_node]
+        while stack:
+            node = stack.pop()
+            data = node.data
+            if not isinstance(data, MindmapNode):
+                continue
+            if data.children:
+                for child_node in node.children:
+                    stack.append(child_node)
+            else:
+                leaves.append((node, data))
+        return leaves
+
+    async def _generate_text_for_leaves(
+        self,
+        root_tree_node: Tree.Node[MindmapNode],
+    ) -> None:
+        data = root_tree_node.data
+        if not isinstance(data, MindmapNode):
+            self.show_status("Selected node no longer available.")
+            return
+        self.populate_tree(root_tree_node, data)
+        leaves = self._gather_leaf_nodes(root_tree_node)
+        if not leaves:
+            self.show_status("No leaf nodes to annotate.")
+            return
+        pending_leaves = [
+            (node, leaf_data) for node, leaf_data in leaves if not leaf_data.body
+        ]
+        if not pending_leaves:
+            self.show_status("All leaf nodes already have text.")
+            return
+        self._full_in_progress = True
+        tree = self.require_tree()
+        root_tree_node.expand_all()
+        self._select_tree_node_without_toggle(root_tree_node)
+        tree.refresh(layout=True)
+        completed = 0
+        try:
+            for leaf_node, leaf_model in pending_leaves:
+                leaf_node.expand_all()
+                await self._generate_body_for_node(leaf_node, leaf_model)
+                completed += 1
+        finally:
+            self._full_in_progress = False
+        root_tree_node.expand_all()
+        self._select_tree_node_without_toggle(root_tree_node)
+        tree.refresh(layout=True)
+        self.show_status(
+            f"Generated text for {completed} leaf node{'s' if completed != 1 else ''}."
+        )
+
+    async def _handle_full_pending_key(self, event: events.Key) -> bool:
+        if self._full_pending is None:
+            return False
+        key = event.key
+        if key == "escape":
+            self._full_pending = None
+            self.show_status("Full build cancelled.")
+            event.stop()
+            return True
+        if self._full_in_progress:
+            self.bell()
+            self.show_status("Full build already running.")
+            event.stop()
+            return True
+        if key.lower() == "t":
+            pending = self._full_pending
+            self._full_pending = None
+            tree = self.require_tree()
+            pending_node = pending.get("node_ref") if isinstance(pending, dict) else None
+            target_node = pending_node if isinstance(pending_node, TreeNode) else None
+            node_id = pending.get("node_id") if isinstance(pending, dict) else None
+            if target_node is None and node_id is not None:
+                try:
+                    target_node = tree.get_node_by_id(node_id)
+                except UnknownNodeID:
+                    target_node = None
+            if target_node is None:
+                target_node = tree.root
+            if target_node is tree.root and not isinstance(target_node.data, MindmapNode):
+                target_node.data = self.mindmap_root
+            if target_node is None or not isinstance(target_node.data, MindmapNode):
+                self.bell()
+                self.show_status("Selected node no longer available.")
+                event.stop()
+                return True
+            event.stop()
+            await self._generate_text_for_leaves(target_node)
+            return True
+        if key.isdigit() and key != "0":
+            depth = int(key)
+            if not 1 <= depth <= 5:
+                self.bell()
+                self.show_status("Depth must be between 1 and 5.")
+                event.stop()
+                return True
+            pending = self._full_pending
+            self._full_pending = None
+            tree = self.require_tree()
+            pending_node = pending.get("node_ref") if isinstance(pending, dict) else None
+            target_node = pending_node if isinstance(pending_node, TreeNode) else None
+            node_id = pending.get("node_id") if isinstance(pending, dict) else None
+            if target_node is None and node_id is not None:
+                try:
+                    target_node = tree.get_node_by_id(node_id)
+                except UnknownNodeID:
+                    target_node = None
+            if target_node is None:
+                target_node = tree.root
+            if target_node is tree.root and not isinstance(target_node.data, MindmapNode):
+                target_node.data = self.mindmap_root
+            if target_node is None or not isinstance(target_node.data, MindmapNode):
+                self.bell()
+                self.show_status("Selected node no longer available.")
+                event.stop()
+                return True
+            event.stop()
+            await self._execute_full_build(target_node, depth)
+            return True
+        # consume unexpected keys while pending
+        self.bell()
+        self.show_status("Full build: press 1-5, T, or Esc.")
+        event.stop()
+        return True
+
+    async def _call_ai_with_spinner(
+        self,
+        tree_node: Tree.Node[MindmapNode],
+        label: str,
+        callable_: Callable[..., object | None],
+        *args: object,
+        **kwargs: object,
+    ) -> object | None:
+        tree = self.require_tree()
+        spinner_frames = ["  .", "  ..", "  ..."]
+        spinner_index = 0
+        spinner_node = tree_node.add_leaf(Text(spinner_frames[0], style="dim italic"))
+        spinner_node.allow_expand = False
+        tree_node.expand()
+        tree.refresh(layout=True)
+
+        def tick() -> None:
+            nonlocal spinner_index
+            spinner_index = (spinner_index + 1) % len(spinner_frames)
+            spinner_node.set_label(Text(spinner_frames[spinner_index], style="dim italic"))
+            tree.refresh(layout=False)
+
+        spinner_timer = self.set_interval(0.25, tick)
+        try:
+            result = await asyncio.to_thread(callable_, *args, **kwargs)
+        except Exception as exc:  # pragma: no cover - defensive programming
+            self.handle_ai_error(label, exc)
+            result = None
+        finally:
+            spinner_timer.stop()
+            spinner_node.remove()
+            tree.refresh(layout=True)
+        return result
+
+    async def _full_generate_recursive(
+        self,
+        tree_node: Tree.Node[MindmapNode],
+        model_node: MindmapNode,
+        depth_remaining: int,
+    ) -> None:
+        if depth_remaining <= 0:
+            return
+
+        context = to_markdown(self.mindmap_root)
+        child_titles = await self._call_ai_with_spinner(
+            tree_node,
+            "full build children",
+            ai.generate_children_auto,
+            model_node.title,
+            context_markdown=context,
+        )
+        if not child_titles:
+            self.show_status(f"Full build: no children for {model_node.title}.")
+            return
+        if not isinstance(child_titles, list):
+            self.show_status(f"Full build: unexpected response for {model_node.title}.")
+            return
+
+        self._apply_generated_children(tree_node, model_node, list(child_titles))
+        tree_node.expand()
+        self.require_tree().refresh(layout=True)
+
+        for child_tree_node in list(tree_node.children):
+            child_data = child_tree_node.data
+            if isinstance(child_data, MindmapNode):
+                await self._full_generate_recursive(
+                    child_tree_node,
+                    child_data,
+                    depth_remaining - 1,
+                )
+            else:
+                self._select_tree_node_without_toggle(tree_node)
+
+    async def _execute_full_build(
+        self,
+        tree_node: Tree.Node[MindmapNode],
+        depth: int,
+    ) -> None:
+        data = tree_node.data
+        if not isinstance(data, MindmapNode):
+            self.bell()
+            self.show_status("Full build requires a node selection.")
+            return
+        self._full_in_progress = True
+        self._select_tree_node_without_toggle(tree_node)
+        self.show_status(f"Full build to depth {depth} in progress…")
+        try:
+            await self._full_generate_recursive(tree_node, data, depth)
+            tree_node.expand_all()
+            self.require_tree().refresh(layout=True)
+            self._select_tree_node_without_toggle(tree_node)
+            self.show_status(f"Full build complete to depth {depth}.")
+        finally:
+            self._full_in_progress = False
+
     async def action_add_child_suggestion(self) -> None:
         selected_tree_node = self.get_selected_tree_node()
         if selected_tree_node is None:
@@ -528,6 +784,38 @@ class MindmapApp(App[None]):
         tree.refresh(layout=True)
         tree.focus()
         self.show_status(f"Removed child '{removed_child.title}'.")
+
+    def action_full_generate(self) -> None:
+        if self._edit_state is not None:
+            self.bell()
+            self.show_status("Finish editing before running a full build.")
+            return
+        if self._full_in_progress:
+            self.bell()
+            self.show_status("Full build already running.")
+            return
+        if self._full_pending is not None:
+            self.bell()
+            self.show_status("Waiting for depth digit (1-5) or Esc.")
+            return
+
+        selected_tree_node = self.get_selected_tree_node()
+        if selected_tree_node is None:
+            self.bell()
+            self.show_status("No node selected.")
+            return
+        target_tree_node, model_node = self._resolve_model_tree_node(selected_tree_node)
+        if target_tree_node is None or model_node is None:
+            self.bell()
+            self.show_status("Full build requires a node selection.")
+            return
+
+        self._full_pending = {
+            "node_id": target_tree_node.id,
+            "node_ref": target_tree_node,
+        }
+        self._select_tree_node_without_toggle(target_tree_node)
+        self.show_status("Full build: press 1-5 for depth, Esc to cancel.")
 
     async def action_generate_children(self, count: int) -> None:
         selected_tree_node = self.get_selected_tree_node()
@@ -728,9 +1016,12 @@ class MindmapApp(App[None]):
         )
 
     async def on_event(self, event: events.Event) -> None:  # noqa: D401
-        if isinstance(event, events.Key) and self._edit_state is not None:
-            self._handle_edit_key(event)
-            return
+        if isinstance(event, events.Key):
+            if self._edit_state is not None:
+                self._handle_edit_key(event)
+                return
+            if await self._handle_full_pending_key(event):
+                return
         await super().on_event(event)
 
     def action_delete_node(self) -> None:

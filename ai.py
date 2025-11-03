@@ -11,10 +11,14 @@ except ImportError:  # pragma: no cover - dependency advisory
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 AVAILABLE_MODELS = [
     "alibaba/tongyi-deepresearch-30b-a3b:free",
+    "google/gemma-3-4b-it:free",
+    "google/gemma-3-12b-it:free",
     "google/gemma-3-27b-it:free",
     "meta-llama/llama-3.3-8b-instruct:free",
+    "meta-llama/llama-4-maverick:free",
     "microsoft/mai-ds-r1:free",
     "minimax/minimax-m2:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
     "moonshotai/kimi-k2:free",
     "nvidia/nemotron-nano-12b-v2-vl:free",
     "nvidia/nemotron-nano-9b-v2:free",

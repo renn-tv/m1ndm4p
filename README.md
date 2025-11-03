@@ -3,49 +3,45 @@
 ![m1ndm4p demo](m1ndm4p.gif)
 
 ## Overview
-- Terminal mind‑mapping tool built on [Textual](https://textual.textualize.io/); renders Markdown-backed trees and keeps the file (`mindmap.md`) as the single source of truth.
-- Node titles are rendered plainly; body text is split into 40-character lines and shown as indented grey children. Markdown export preserves the original paragraphs.
-- AI hooks (`ai.generate_children`, `ai.generate_paragraph`) are stubbed to local helpers when API access is unavailable; workflow still functions with deterministic mock text.
+- Textual-based TUI that keeps `mindmap.md` as the single source of truth while you browse, edit, and enrich the tree in place.
+- Nodes render as a classic outline: titles sit on bold rows, body text is wrapped into 40-character grey leaves for quick skim reading.
+- AI helpers run through OpenRouter when an API key is present, but deterministic fallbacks keep the tool useful offline.
 
-## Features
-- Single-source Markdown mind map that stays in sync with the TUI.
-- Inline editing for node titles and wrapped text lines (no modal popups).
-- AI-assisted idea generation via OpenRouter (child nodes + body text). Auto mode (`?`) lets the model pick a sensible number of children.
-- Instant `.`, `..`, `...` spinner feedback during remote calls.
-- Keyboard-only workflow with fast child generation (`1`–`9`), text creation (`t`), editing (`e`), and clearing (`0`).
+## Highlights
+- **Model palette (`m`)**: swap between curated free OpenRouter models without leaving the terminal; the active choice is always in the status bar.
+- **Incremental ideation (`+` / `-`)**: ask the AI for *one more* child or prune the last one to fine-tune a branch without regenerating everything.
+- **Full build (`f` → digit)**: recursively populate a subtree `n` levels deep with AI-chosen children, keeping focus on the node that initiated the action.
+- **Leaf narration (`f` → `t`)**: after expanding a branch, instantly request text for every leaf so you can watch paragraphs appear live.
+- **Inline editing**: titles and wrapped body lines edit in situ with the familiar `Enter`/`Esc` flow; focus never jumps away.
+- **Fast feedback**: consistent `.`, `..`, `...` spinners for background work and a status banner that reports every action.
 
 ## Run
 1. Activate the virtualenv (`source .venv/bin/activate`).
-2. Launch the TUI: `python app.py`.
-3. Keep `mindmap.md` in the project root—`o` reloads it and expands the whole tree automatically.
+2. Launch the interface: `python app.py`.
+3. Keep `mindmap.md` in the project root so `o` can reload it and the tree can rehydrate automatically.
 
 ### Optional: Enable OpenRouter AI
 - Create an account at [openrouter.ai](https://openrouter.ai/) and obtain an API key.
-- Export the key before launching the app  
+- Export credentials before starting the app  
   ```bash
   export OPENROUTER_API_KEY="sk-..."
-  # optional model override
+  # optional: choose a different default model
   export OPENROUTER_MODEL="minimax/minimax-chat"
   ```
 - Install `requests` in the virtualenv (`pip install requests`).
-- With the key present, `1`–`9` and `t` call OpenRouter; without it, the app falls back to deterministic mock text.
+- With the key present, AI shortcuts hit OpenRouter; otherwise the tool falls back to predictable mock suggestions.
 
 ## Key Bindings
-- `1`–`9`: generate child nodes (count = key).
-- `?`: let the AI pick a sensible number of child nodes.
-- `t`: generate placeholder body text for the selected node.
-- `e`: inline edit (node titles or text lines). Existing text highlights; typing replaces it.  
-  - `Enter` saves, staying on the row.  
-  - `Esc` cancels.
-- `0`: delete the selected node (except the root).
-- `a`: expand the entire tree.
-- `o`: reload `mindmap.md`.
-- `s`: save current tree back to `mindmap.md`.
-- Arrow keys navigate; `q` quits.
+- Navigation: arrow keys move the cursor; `a` expands the entire tree; `q` quits.
+- Generation: `1`–`9` add that many children; `?` lets the AI decide; `+` requests one more child; `-` removes the last child.
+- Content: `t` writes body text for the selected node; `f` followed by a digit performs a full multi-level build; `f` followed by `t` writes text for every leaf under the current node.
+- Editing: `e` toggles inline edit (`Enter` saves, `Esc` cancels); `0` clears the current node (body + children).
+- Data management: `o` reloads `mindmap.md`; `s` saves; `m` opens the model selector palette.
 
 ## Editing Behaviour
 - Text lines are stored per node in `MindmapNode.body`; inline edits rebuild the wrapped lines while keeping focus on the edited entry.
-- AI paragraphs target roughly 200 characters, but the full response is kept (wrapped at 40 chars for display) so longer context is preserved in Markdown.
+- AI paragraphs target roughly 200 characters and expand their branch automatically so you can see the newly generated text immediately.
+- Full builds always expand the active subtree and keep focus on the node that initiated the action.
 
 ## Markdown Format
 ```
