@@ -9,7 +9,29 @@ except ImportError:  # pragma: no cover - dependency advisory
     print("The 'requests' library is required for OpenRouter access. Please install it to enable AI features.")
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "minimax/minimax-chat"  # Default free tier model
+AVAILABLE_MODELS = [
+    "alibaba/tongyi-deepresearch-30b-a3b:free",
+    "google/gemma-3-27b-it:free",
+    "meta-llama/llama-3.3-8b-instruct:free",
+    "microsoft/mai-ds-r1:free",
+    "minimax/minimax-m2:free",
+    "moonshotai/kimi-k2:free",
+    "nvidia/nemotron-nano-12b-v2-vl:free",
+    "nvidia/nemotron-nano-9b-v2:free",
+    "openai/gpt-oss-20b:free",
+    "qwen/qwen3-coder:free",
+    "tngtech/deepseek-r1t2-chimera:free",
+    "z-ai/glm-4.5-air:free",
+]
+DEFAULT_MODEL = AVAILABLE_MODELS[0]
+
+
+def get_active_model() -> str:
+    return os.getenv("OPENROUTER_MODEL", DEFAULT_MODEL)
+
+
+def set_active_model(model: str) -> None:
+    os.environ["OPENROUTER_MODEL"] = model
 
 
 def _post_openrouter(model: str, messages: list[dict]) -> Optional[dict]:
@@ -53,7 +75,7 @@ def _extract_text(response: dict) -> Optional[str]:
 
 
 def _call_openrouter(prompt: str) -> Optional[str]:
-    model = os.getenv("OPENROUTER_MODEL", DEFAULT_MODEL)
+    model = get_active_model()
     response = _post_openrouter(model, [{"role": "user", "content": prompt}])
     if not response:
         return None

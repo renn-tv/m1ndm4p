@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from pathlib import Path
 import asyncio
+from pathlib import Path
 import textwrap
 from typing import Optional
 
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Footer, Header, Tree
+from textual.containers import Vertical
+from textual.screen import ModalScreen
+from textual.widgets import Footer, Header, OptionList, Static, Tree
+from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.widgets._tree import TextType
 from rich.text import Text
 
@@ -26,6 +29,83 @@ class MindmapTree(Tree[MindmapNode]):
         return label
 
 
+class ModelSelectorScreen(ModalScreen[str | None]):
+    """Modal dialog that lets the user pick an OpenRouter model."""
+
+    DEFAULT_CSS = """
+    ModelSelectorScreen {
+        align: center middle;
+    }
+
+    #model-selector-panel {
+        min-width: 50;
+        max-width: 80;
+        background: $panel;
+        border: round $secondary;
+        padding: 1 2 2 2;
+        box-sizing: border-box;
+    }
+
+    #model-selector-title {
+        content-align: center middle;
+        text-style: bold;
+        padding-bottom: 1;
+    }
+
+    #model-selector-list {
+        border: none;
+        background: $surface;
+        padding: 0;
+    }
+
+    #model-selector-list > .option-list--option,
+    #model-selector-list > .option-list--option-highlighted {
+        padding: 0 2;
+    }
+
+    #model-selector-list > .option-list--option-highlighted {
+        background: $accent;
+        color: $text;
+        text-style: bold;
+    }
+
+    #model-selector-list:focus {
+        border: none;
+        outline: none;
+    }
+    """
+
+    def __init__(self, models: list[str], current_model: str) -> None:
+        super().__init__()
+        self._models = models
+        self._current_model = current_model
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="model-selector-panel"):
+            yield Static("Select OpenRouter model", id="model-selector-title")
+            yield OptionList(
+                *[Option(model, id=model) for model in self._models],
+                id="model-selector-list",
+            )
+
+    def on_mount(self) -> None:
+        option_list = self.query_one("#model-selector-list", OptionList)
+        option_list.focus()
+        try:
+            option_list.highlighted = option_list.get_option_index(self._current_model)
+        except OptionDoesNotExist:
+            option_list.highlighted = 0 if option_list.option_count else None
+        option_list.scroll_to_highlight()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        selected = event.option_id or str(event.option.prompt)
+        self.dismiss(selected)
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            event.stop()
+            self.dismiss(None)
 class MindmapApp(App[None]):
     """Textual user interface for the Markdown-backed mind map."""
 
@@ -49,6 +129,9 @@ class MindmapApp(App[None]):
         Binding("t", "generate_body", "(text)"),
         Binding("e", "edit_node", "(edit)"),
         Binding("a", "expand_all", "Expand All"),
+        Binding("+", "add_child_suggestion", "(child +)"),
+        Binding("-", "remove_child_suggestion", "(child -)"),
+        Binding("m", "choose_model", "Model"),
         Binding("1", "generate_children(1)", "(AI nodes)", key_display="1-9"),
         Binding("?", "auto_generate_children", "(AI auto)"),
     ] + [
@@ -62,6 +145,12 @@ class MindmapApp(App[None]):
         self._tree_widget: Optional[MindmapTree] = None
         self.mindmap_root = MindmapNode("Central Idea")
         self._edit_state: Optional[dict[str, object]] = None
+        self.model_choices = list(ai.AVAILABLE_MODELS)
+        self.selected_model = ai.get_active_model()
+        if self.selected_model not in self.model_choices:
+            self.model_choices.append(self.selected_model)
+            self.model_choices.sort()
+        ai.set_active_model(self.selected_model)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -309,6 +398,137 @@ class MindmapApp(App[None]):
             current = current.parent
         return level
 
+    def _resolve_model_tree_node(
+        self, tree_node: Tree.Node[MindmapNode]
+    ) -> tuple[Tree.Node[MindmapNode], MindmapNode] | tuple[None, None]:
+        data = tree_node.data
+        if isinstance(data, MindmapNode):
+            return tree_node, data
+        if isinstance(data, dict) and data.get("kind") == "body_line":
+            parent_node = tree_node.parent
+            if parent_node is not None and isinstance(parent_node.data, MindmapNode):
+                return parent_node, parent_node.data
+        return None, None
+
+    @staticmethod
+    def _unique_child_title(raw_title: str | None, parent: MindmapNode) -> str:
+        candidate = (raw_title or "").strip()
+        existing_titles = {child.title for child in parent.children}
+        if not candidate or candidate in existing_titles:
+            base_index = len(parent.children) + 1
+            candidate = f"{parent.title} idea {base_index}"
+            while candidate in existing_titles:
+                base_index += 1
+                candidate = f"{parent.title} idea {base_index}"
+        return candidate
+
+    def _select_tree_node_without_toggle(self, node: Tree.Node[MindmapNode]) -> None:
+        tree = self.require_tree()
+        auto_expand_initial = tree.auto_expand
+        if auto_expand_initial:
+            tree.auto_expand = False
+
+            def _restore_auto_expand() -> None:
+                tree.auto_expand = auto_expand_initial
+
+            self.call_after_refresh(_restore_auto_expand)
+        tree.select_node(node)
+
+    async def action_add_child_suggestion(self) -> None:
+        selected_tree_node = self.get_selected_tree_node()
+        if selected_tree_node is None:
+            self.bell()
+            self.show_status("No node selected.")
+            return
+
+        target_tree_node, model_node = self._resolve_model_tree_node(selected_tree_node)
+        if target_tree_node is None or model_node is None:
+            self.bell()
+            self.show_status("Cannot add a child to this entry.")
+            return
+
+        target_node_id = target_tree_node.id
+        context = to_markdown(self.mindmap_root)
+        tree = self.require_tree()
+        spinner_frames = ["  .", "  ..", "  ..."]
+        spinner_index = 0
+        spinner_node = target_tree_node.add_leaf(Text(spinner_frames[0], style="dim italic"))
+        spinner_node.allow_expand = False
+        target_tree_node.expand()
+        tree.refresh(layout=True)
+
+        def tick() -> None:
+            nonlocal spinner_index
+            spinner_index = (spinner_index + 1) % len(spinner_frames)
+            spinner_node.set_label(Text(spinner_frames[spinner_index], style="dim italic"))
+            tree.refresh(layout=False)
+
+        spinner_timer = self.set_interval(0.25, tick)
+        try:
+            suggestions = await asyncio.to_thread(
+                ai.generate_children, model_node.title, 1, context_markdown=context
+            )
+        except Exception as exc:  # pragma: no cover - defensive programming
+            self.handle_ai_error("add child suggestion", exc)
+            suggestions = []
+        finally:
+            spinner_timer.stop()
+            spinner_node.remove()
+            tree.refresh(layout=True)
+
+        if not suggestions:
+            self.show_status("No suggestion returned.")
+            return
+
+        candidate_title = None
+        existing_titles = {child.title for child in model_node.children}
+        for suggestion in suggestions:
+            suggestion = suggestion.strip()
+            if suggestion and suggestion not in existing_titles:
+                candidate_title = suggestion
+                break
+
+        new_title = self._unique_child_title(candidate_title, model_node)
+        model_node.children.append(MindmapNode(new_title))
+        self.populate_tree(target_tree_node, model_node)
+
+        refreshed_parent = tree.get_node_by_id(target_node_id) or tree.root
+        refreshed_parent.expand()
+        self._select_tree_node_without_toggle(refreshed_parent)
+        tree.refresh(layout=True)
+        tree.focus()
+        self.show_status(f"Added child '{new_title}'.")
+
+    def action_remove_child_suggestion(self) -> None:
+        selected_tree_node = self.get_selected_tree_node()
+        if selected_tree_node is None:
+            self.bell()
+            self.show_status("No node selected.")
+            return
+
+        target_tree_node, model_node = self._resolve_model_tree_node(selected_tree_node)
+        if target_tree_node is None or model_node is None:
+            self.bell()
+            self.show_status("Cannot remove a child from this entry.")
+            return
+
+        if not model_node.children:
+            self.bell()
+            self.show_status("No child nodes to remove.")
+            return
+
+        tree = self.require_tree()
+        parent_node_id = target_tree_node.id
+        removed_child = model_node.children.pop()
+        self.populate_tree(target_tree_node, model_node)
+
+        refreshed_parent = tree.get_node_by_id(parent_node_id) or tree.root
+        refreshed_parent.expand()
+        self._select_tree_node_without_toggle(refreshed_parent)
+        tree.refresh(layout=True)
+        tree.focus()
+        self.show_status(f"Removed child '{removed_child.title}'.")
+
     async def action_generate_children(self, count: int) -> None:
         selected_tree_node = self.get_selected_tree_node()
         if selected_tree_node is None or selected_tree_node.data is None:
@@ -398,6 +618,31 @@ class MindmapApp(App[None]):
         tree.root.expand_all()
         tree.refresh(layout=True)
         self.show_status("Expanded entire tree.")
+
+    def action_choose_model(self) -> None:
+        if not self.model_choices:
+            self.bell()
+            self.show_status("No models configured.")
+            return
+
+        def apply_selection(selection: str | None) -> None:
+            if not selection:
+                self.show_status(f"Model unchanged ({self.selected_model}).")
+                return
+            if selection not in self.model_choices:
+                self.model_choices.append(selection)
+            self.model_choices.sort()
+            if selection == self.selected_model:
+                self.show_status(f"Model unchanged ({self.selected_model}).")
+                return
+            self.selected_model = selection
+            ai.set_active_model(selection)
+            self.show_status(f"Model set to {selection}.")
+
+        self.push_screen(
+            ModelSelectorScreen(self.model_choices, self.selected_model),
+            apply_selection,
+        )
 
     def action_edit_node(self) -> None:
         if self._edit_state is not None:
@@ -569,7 +814,7 @@ class MindmapApp(App[None]):
         self.require_tree().action_cursor_down()
 
     def show_status(self, message: str) -> None:
-        self.sub_title = message
+        self.sub_title = f"{message} | Model: {self.selected_model}"
 
     def find_parent(self, root: MindmapNode, target: MindmapNode) -> Optional[MindmapNode]:
         for child in root.children:

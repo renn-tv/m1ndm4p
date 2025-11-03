@@ -4,17 +4,13 @@
 
 ### Frame Materials
 
-#### Steel
+#### Carbon Fiber Composites
 
-#### Aluminum
+#### Aluminum Alloys
 
-#### Carbon Fiber
+#### Chromoly Steel
 
-#### Titanium
-
-#### Chromoly
-
-#### Composite
+#### Titanium Frames
 
 ### Gear Systems
 
