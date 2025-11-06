@@ -99,6 +99,7 @@ def _post_openrouter(model: str, messages: list[dict]) -> Optional[dict]:
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
+        "X-Title": "m1ndm4p",
     }
     body = {
         "model": model,
