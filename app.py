@@ -8,9 +8,9 @@ from typing import Callable, Optional
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Footer, Header, OptionList, Static, Tree
+from textual.widgets import Button, Footer, Header, OptionList, Static, Tree, TextArea
 from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.widgets._tree import TextType, TreeNode, UnknownNodeID
 from rich.text import Text
@@ -106,6 +106,84 @@ class ModelSelectorScreen(ModalScreen[str | None]):
         if event.key == "escape":
             event.stop()
             self.dismiss(None)
+
+
+class ContextEditorScreen(ModalScreen[dict[str, str] | None]):
+    """Modal dialog that lets the user edit lightweight external context."""
+
+    DEFAULT_CSS = """
+    ContextEditorScreen {
+        align: center middle;
+    }
+
+    #context-editor-panel {
+        min-width: 60;
+        max-width: 90;
+        min-height: 12;
+        max-height: 30;
+        background: $panel;
+        border: round $secondary;
+        padding: 1 2 2 2;
+        box-sizing: border-box;
+    }
+
+    #context-editor-title {
+        content-align: center middle;
+        text-style: bold;
+    }
+
+    #context-editor-text {
+        height: 1fr;
+        border: round $accent;
+        background: $surface;
+    }
+
+    #context-editor-actions {
+        width: 100%;
+        align-horizontal: right;
+    }
+    """
+
+    def __init__(self, initial_text: str) -> None:
+        super().__init__()
+        self._initial_text = initial_text
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="context-editor-panel"):
+            yield Static("External knowledge", id="context-editor-title")
+            yield TextArea(
+                text=self._initial_text,
+                id="context-editor-text",
+                placeholder="Paste or edit reference text to guide AI responses…",
+                soft_wrap=True,
+            )
+            with Horizontal(id="context-editor-actions"):
+                yield Button("Add Context", id="context-editor-apply", variant="primary")
+                yield Button("Reset", id="context-editor-reset", variant="warning")
+                yield Button("Cancel", id="context-editor-cancel")
+
+    def on_mount(self) -> None:
+        textarea = self.query_one("#context-editor-text", TextArea)
+        textarea.focus()
+
+    def _gather_text(self) -> str:
+        textarea = self.query_one("#context-editor-text", TextArea)
+        return textarea.text
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id
+        event.stop()
+        if button_id == "context-editor-apply":
+            self.dismiss({"action": "apply", "text": self._gather_text()})
+        elif button_id == "context-editor-reset":
+            self.dismiss({"action": "reset"})
+        else:
+            self.dismiss(None)
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            event.stop()
+            self.dismiss(None)
 class MindmapApp(App[None]):
     """Textual user interface for the Markdown-backed mind map."""
 
@@ -128,6 +206,7 @@ class MindmapApp(App[None]):
         Binding("0", "delete_node", "(del)"),
         Binding("t", "generate_body", "(text)"),
         Binding("e", "edit_node", "(edit)"),
+        Binding("i", "edit_context", "Context"),
         Binding("a", "expand_all", "Expand All"),
         Binding("+", "add_child_suggestion", "(child +)"),
         Binding("-", "remove_child_suggestion", "(child -)"),
@@ -154,6 +233,7 @@ class MindmapApp(App[None]):
         ai.set_active_model(self.selected_model)
         self._full_pending: Optional[dict[str, object]] = None
         self._full_in_progress = False
+        self._external_context = ""
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -235,6 +315,23 @@ class MindmapApp(App[None]):
         if not lines:
             lines.append("")
         return lines
+
+    def _has_external_context(self) -> bool:
+        return bool(self._external_context.strip())
+
+    def _context_state_label(self) -> str:
+        return "on" if self._has_external_context() else "off"
+
+    def _set_external_context(self, value: str) -> None:
+        self._external_context = value.strip()
+
+    def _contextual_markdown(self) -> str:
+        base = to_markdown(self.mindmap_root)
+        extra = self._external_context.strip()
+        if not extra:
+            return base
+        external_block = f"External knowledge:\n{extra}"
+        return f"{base}\n\n{external_block}" if base else external_block
 
     def _apply_generated_children(
         self,
@@ -443,7 +540,7 @@ class MindmapApp(App[None]):
         tree_node: Tree.Node[MindmapNode],
         model_node: MindmapNode,
     ) -> None:
-        context = to_markdown(self.mindmap_root)
+        context = self._contextual_markdown()
         paragraph = await self._call_ai_with_spinner(
             tree_node,
             "generate paragraph",
@@ -645,7 +742,7 @@ class MindmapApp(App[None]):
         if depth_remaining <= 0:
             return
 
-        context = to_markdown(self.mindmap_root)
+        context = self._contextual_markdown()
         child_titles = await self._call_ai_with_spinner(
             tree_node,
             "full build children",
@@ -711,7 +808,7 @@ class MindmapApp(App[None]):
             return
 
         target_node_id = target_tree_node.id
-        context = to_markdown(self.mindmap_root)
+        context = self._contextual_markdown()
         tree = self.require_tree()
         spinner_frames = ["  .", "  ..", "  ..."]
         spinner_index = 0
@@ -834,7 +931,7 @@ class MindmapApp(App[None]):
             self.show_status("Count must be positive.")
             return
         model_node = selected_tree_node.data
-        context = to_markdown(self.mindmap_root)
+        context = self._contextual_markdown()
         tree = self.require_tree()
         spinner_frames = ["  .", "  ..", "  ..."]
         spinner_index = 0
@@ -879,7 +976,7 @@ class MindmapApp(App[None]):
             self.show_status("No node selected.")
             return
         model_node = selected_tree_node.data
-        context = to_markdown(self.mindmap_root)
+        context = self._contextual_markdown()
         tree = self.require_tree()
         spinner_frames = ["  .", "  ..", "  ..."]
         spinner_index = 0
@@ -943,6 +1040,33 @@ class MindmapApp(App[None]):
             apply_selection,
         )
 
+    def action_edit_context(self) -> None:
+        def apply_context(result: dict[str, str] | None) -> None:
+            if not isinstance(result, dict):
+                self.show_status("Context unchanged.")
+                return
+            action = result.get("action")
+            if action == "reset":
+                had_context = self._has_external_context()
+                self._set_external_context("")
+                message = "External context reset." if had_context else "No external context to reset."
+                self.show_status(message)
+                return
+            if action == "apply":
+                previous = self._external_context
+                next_value = result.get("text", "")
+                self._set_external_context(next_value)
+                if self._has_external_context():
+                    self.show_status("External context updated.")
+                else:
+                    self.show_status(
+                        "External context cleared." if previous else "External context unchanged."
+                    )
+                return
+            self.show_status("Context unchanged.")
+
+        self.push_screen(ContextEditorScreen(self._external_context), apply_context)
+
     def action_edit_node(self) -> None:
         if self._edit_state is not None:
             return
@@ -987,7 +1111,7 @@ class MindmapApp(App[None]):
             self.show_status("No node selected.")
             return
         model_node = selected_tree_node.data
-        context = to_markdown(self.mindmap_root)
+        context = self._contextual_markdown()
         tree = self.require_tree()
         spinner_frames = ["  .", "  ..", "  ..."]
         spinner_index = 0
@@ -1116,7 +1240,8 @@ class MindmapApp(App[None]):
         self.require_tree().action_cursor_down()
 
     def show_status(self, message: str) -> None:
-        self.sub_title = f"{message} | Model: {self.selected_model}"
+        context_state = self._context_state_label()
+        self.sub_title = f"{message} | Model: {self.selected_model} | Context: {context_state}"
 
     def find_parent(self, root: MindmapNode, target: MindmapNode) -> Optional[MindmapNode]:
         for child in root.children:
