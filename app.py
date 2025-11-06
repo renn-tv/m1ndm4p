@@ -619,8 +619,13 @@ class MindmapApp(App[None]):
             tree.refresh(layout=False)
 
         spinner_timer = self.set_interval(0.25, tick)
+        task = asyncio.create_task(asyncio.to_thread(callable_, *args, **kwargs))
+        self._active_ai_task = task
         try:
-            result = await asyncio.to_thread(callable_, *args, **kwargs)
+            result = await task
+        except asyncio.CancelledError:
+            self.show_status("AI request cancelled.")
+            raise
         except Exception as exc:  # pragma: no cover - defensive programming
             self.handle_ai_error(label, exc)
             result = None
@@ -628,6 +633,7 @@ class MindmapApp(App[None]):
             spinner_timer.stop()
             spinner_node.remove()
             tree.refresh(layout=True)
+            self._active_ai_task = None
         return result
 
     async def _full_generate_recursive(
