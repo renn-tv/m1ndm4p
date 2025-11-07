@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+from html.parser import HTMLParser
 from pathlib import Path
 import textwrap
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional
+from urllib import request
+from urllib.parse import urlparse
 
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Vertical
+from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, OptionList, Static, Tree, TextArea
+from textual.widgets import Footer, Header, Input, OptionList, Static, Tree, TextArea
 from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.widgets._tree import TextType, TreeNode, UnknownNodeID
 from rich.text import Text
@@ -18,6 +23,13 @@ from rich.text import Text
 from md_io import from_markdown, to_markdown
 from models import MindmapNode
 import ai
+
+
+def _key_name_and_modifiers(key_value: str) -> tuple[str, set[str]]:
+    parts = key_value.split("+")
+    key_name = parts[-1].lower()
+    modifiers = {part.lower() for part in parts[:-1] if part}
+    return key_name, modifiers
 
 
 class MindmapTree(Tree[MindmapNode]):
@@ -108,39 +120,40 @@ class ModelSelectorScreen(ModalScreen[str | None]):
             self.dismiss(None)
 
 
+class ContextTextArea(TextArea):
+    """Specialised TextArea that posts a submit message on Enter."""
+
+    class Submitted(Message):
+        def __init__(self, textarea: "ContextTextArea") -> None:
+            super().__init__()
+            self.textarea = textarea
+            self.text = textarea.text
+
+    async def on_event(self, event: events.Event) -> None:  # noqa: D401
+        if isinstance(event, events.Key):
+            key_name, modifiers = _key_name_and_modifiers(event.key)
+            if key_name == "enter" and "shift" not in modifiers:
+                event.stop()
+                self.post_message(self.Submitted(self))
+                return
+        await super().on_event(event)
+
+
 class ContextEditorScreen(ModalScreen[dict[str, str] | None]):
     """Modal dialog that lets the user edit lightweight external context."""
 
     DEFAULT_CSS = """
     ContextEditorScreen {
         align: center middle;
-    }
-
-    #context-editor-panel {
-        min-width: 60;
-        max-width: 90;
-        min-height: 12;
-        max-height: 30;
-        background: $panel;
-        border: round $secondary;
-        padding: 1 2 2 2;
-        box-sizing: border-box;
-    }
-
-    #context-editor-title {
-        content-align: center middle;
-        text-style: bold;
+        background: transparent;
     }
 
     #context-editor-text {
-        height: 1fr;
-        border: round $accent;
-        background: $surface;
-    }
-
-    #context-editor-actions {
-        width: 100%;
-        align-horizontal: right;
+        width: 90;
+        height: 16;
+        border: round $secondary;
+        background: $surface 6%;
+        padding: 0;
     }
     """
 
@@ -149,41 +162,69 @@ class ContextEditorScreen(ModalScreen[dict[str, str] | None]):
         self._initial_text = initial_text
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="context-editor-panel"):
-            yield Static("External knowledge", id="context-editor-title")
-            yield TextArea(
-                text=self._initial_text,
-                id="context-editor-text",
-                placeholder="Paste or edit reference text to guide AI responses…",
-                soft_wrap=True,
-            )
-            with Horizontal(id="context-editor-actions"):
-                yield Button("Add Context", id="context-editor-apply", variant="primary")
-                yield Button("Reset", id="context-editor-reset", variant="warning")
-                yield Button("Cancel", id="context-editor-cancel")
+        yield ContextTextArea(
+            text=self._initial_text,
+            id="context-editor-text",
+            placeholder="Paste or edit reference text to guide AI responses…",
+            soft_wrap=True,
+        )
 
     def on_mount(self) -> None:
         textarea = self.query_one("#context-editor-text", TextArea)
         textarea.focus()
 
     def _gather_text(self) -> str:
-        textarea = self.query_one("#context-editor-text", TextArea)
+        textarea = self.query_one("#context-editor-text", ContextTextArea)
         return textarea.text
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        button_id = event.button.id
-        event.stop()
-        if button_id == "context-editor-apply":
-            self.dismiss({"action": "apply", "text": self._gather_text()})
-        elif button_id == "context-editor-reset":
-            self.dismiss({"action": "reset"})
-        else:
-            self.dismiss(None)
 
     def on_key(self, event: events.Key) -> None:
         if event.key == "escape":
             event.stop()
             self.dismiss(None)
+
+    def on_context_text_area_submitted(self, message: ContextTextArea.Submitted) -> None:
+        message.stop()
+        self.dismiss({"action": "apply", "text": message.text})
+
+
+class URLImportScreen(ModalScreen[dict[str, str] | None]):
+    """Modal prompt for importing external context from a URL."""
+
+    DEFAULT_CSS = """
+    URLImportScreen {
+        align: center middle;
+        background: transparent;
+    }
+
+    #url-import-field {
+        width: 60;
+        border: round $secondary;
+        background: $surface;
+    }
+    """
+
+    def __init__(self, initial_url: str) -> None:
+        super().__init__()
+        self._initial_url = initial_url
+
+    def compose(self) -> ComposeResult:
+        yield Input(
+            value=self._initial_url,
+            placeholder="https://example.com/article",
+            id="url-import-field",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#url-import-field", Input).focus()
+
+    def on_key(self, event: events.Key) -> None:
+        field = self.query_one("#url-import-field", Input)
+        if event.key == "escape":
+            event.stop()
+            self.dismiss(None)
+        elif event.key == "enter":
+            event.stop()
+            self.dismiss({"action": "fetch", "url": field.value})
 class MindmapApp(App[None]):
     """Textual user interface for the Markdown-backed mind map."""
 
@@ -192,6 +233,10 @@ class MindmapApp(App[None]):
     CSS = """
     #mindmap-tree {
         width: 1fr;
+    }
+    #mindmap-tree .tree--cursor,
+    #mindmap-tree:focus .tree--cursor {
+        text-style: none;
     }
     """
 
@@ -207,6 +252,8 @@ class MindmapApp(App[None]):
         Binding("t", "generate_body", "(text)"),
         Binding("e", "edit_node", "(edit)"),
         Binding("i", "edit_context", "Context"),
+        Binding("w", "import_web_context", "(web ctx)"),
+        Binding("tab", "add_manual_child", "(manual +)", show=False, priority=True),
         Binding("a", "expand_all", "Expand All"),
         Binding("+", "add_child_suggestion", "(child +)"),
         Binding("-", "remove_child_suggestion", "(child -)"),
@@ -234,6 +281,11 @@ class MindmapApp(App[None]):
         self._full_pending: Optional[dict[str, object]] = None
         self._full_in_progress = False
         self._external_context = ""
+        self._context_url = ""
+        self._stop_after_current_step = False
+        self._full_task: Optional[asyncio.Task[None]] = None
+        ai.reset_prompt_log()
+        ai.reset_connection_log()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -333,6 +385,83 @@ class MindmapApp(App[None]):
         external_block = f"External knowledge:\n{extra}"
         return f"{base}\n\n{external_block}" if base else external_block
 
+    @contextmanager
+    def _prompt_log_session(self, label: str) -> None:
+        ai.start_prompt_session(label)
+        try:
+            yield
+        finally:
+            ai.finish_prompt_session()
+
+    @staticmethod
+    def _strip_html(html_text: str) -> str:
+        class _Extractor(HTMLParser):
+            def __init__(self) -> None:
+                super().__init__()
+                self._chunks: list[str] = []
+
+            def handle_data(self, data: str) -> None:
+                if data.strip():
+                    self._chunks.append(data.strip())
+
+            def get_text(self) -> str:
+                return "\n".join(self._chunks)
+
+        extractor = _Extractor()
+        try:
+            extractor.feed(html_text)
+        except Exception:
+            return html_text
+        return "\n".join(line for line in extractor.get_text().splitlines() if line.strip())
+
+    @staticmethod
+    def _hostname_from_url(url: str) -> str:
+        parsed = urlparse(url)
+        return parsed.netloc or url
+
+    def _download_url_text(self, url: str) -> str:
+        parsed = urlparse(url)
+        if not parsed.scheme:
+            url = f"https://{url}"
+        req = request.Request(
+            url,
+            headers={
+                "User-Agent": "m1ndm4p/1.0 (+https://github.com/m1ndm4p)",
+                "Accept": "text/html, text/plain;q=0.9",
+            },
+        )
+        with request.urlopen(req, timeout=15) as response:
+            content_type = response.headers.get_content_type()
+            charset = response.headers.get_content_charset() or "utf-8"
+            body = response.read().decode(charset, errors="replace")
+        if "html" in content_type.lower():
+            return self._strip_html(body)
+        return body
+
+    async def _import_context_from_url(self, url: str) -> None:
+        target = url.strip()
+        if not target:
+            self.show_status("URL import cancelled.")
+            return
+        parsed = urlparse(target)
+        if not parsed.scheme:
+            target = f"https://{target}"
+        host = self._hostname_from_url(target)
+        self.show_status(f"Fetching context from {host}…")
+        try:
+            text = await asyncio.to_thread(self._download_url_text, target)
+        except Exception as exc:
+            self.bell()
+            self.show_status(f"Failed to fetch {host}: {exc}")
+            return
+        cleaned = text.strip()
+        if not cleaned:
+            self.show_status(f"No usable text returned from {host}.")
+            return
+        self._set_external_context(cleaned)
+        self._context_url = target
+        self.show_status(f"Imported web context from {host}.")
+
     def _apply_generated_children(
         self,
         tree_node: Tree.Node[MindmapNode],
@@ -362,69 +491,201 @@ class MindmapApp(App[None]):
         kind: str,
         context: dict[str, object],
     ) -> None:
-        buffer = ""
         original_label = tree_node._label.copy()
         self._edit_state = {
             "tree_node": tree_node,
-            "buffer": buffer,
+            "text": initial_text,
+            "cursor": len(initial_text),
+            "selection_anchor": 0 if initial_text else None,
             "kind": kind,
             "context": context,
             "original_label": original_label,
             "initial": initial_text,
             "tree_node_id": tree_node.id,
         }
-        self._update_edit_label(select_all=True)
+        self._update_edit_label()
         self.show_status("Editing… Enter to save, Esc to cancel.")
 
-    def _update_edit_label(self, *, select_all: bool = False) -> None:
+    def _edit_selection_bounds(self) -> tuple[int, int]:
+        if self._edit_state is None:
+            return (0, 0)
+        cursor = self._edit_state["cursor"]
+        anchor = self._edit_state.get("selection_anchor")
+        if anchor is None or anchor == cursor:
+            return (cursor, cursor)
+        start = min(cursor, anchor)
+        end = max(cursor, anchor)
+        return (start, end)
+
+    def _edit_delete_selection(self) -> bool:
+        if self._edit_state is None:
+            return False
+        start, end = self._edit_selection_bounds()
+        if start == end:
+            return False
+        text_value: str = self._edit_state["text"]
+        self._edit_state["text"] = text_value[:start] + text_value[end:]
+        self._edit_state["cursor"] = start
+        self._edit_state["selection_anchor"] = None
+        return True
+
+    def _edit_move_cursor(
+        self,
+        *,
+        delta: Optional[int] = None,
+        to: Optional[int] = None,
+        extend: bool = False,
+    ) -> None:
+        if self._edit_state is None:
+            return
+        state = self._edit_state
+        if to is None and delta is None:
+            return
+        target = to if to is not None else state["cursor"] + (delta or 0)
+        length = len(state["text"])
+        target = max(0, min(length, target))
+        if extend:
+            if state.get("selection_anchor") is None:
+                state["selection_anchor"] = state["cursor"]
+        else:
+            state["selection_anchor"] = None
+        state["cursor"] = target
+        self._update_edit_label()
+
+    def _edit_insert_text(self, value: str) -> None:
+        if self._edit_state is None or not value:
+            return
+        state = self._edit_state
+        if self._edit_delete_selection():
+            pass
+        cursor = state["cursor"]
+        text_value: str = state["text"]
+        state["text"] = text_value[:cursor] + value + text_value[cursor:]
+        state["cursor"] = cursor + len(value)
+        state["selection_anchor"] = None
+        self._update_edit_label()
+
+    def _edit_backspace(self) -> None:
+        if self._edit_state is None:
+            return
+        if self._edit_delete_selection():
+            self._update_edit_label()
+            return
+        cursor = self._edit_state["cursor"]
+        if cursor == 0:
+            return
+        text_value: str = self._edit_state["text"]
+        self._edit_state["text"] = text_value[: cursor - 1] + text_value[cursor:]
+        self._edit_state["cursor"] = cursor - 1
+        self._update_edit_label()
+
+    def _edit_delete_forward(self) -> None:
+        if self._edit_state is None:
+            return
+        if self._edit_delete_selection():
+            self._update_edit_label()
+            return
+        cursor = self._edit_state["cursor"]
+        text_value: str = self._edit_state["text"]
+        if cursor >= len(text_value):
+            return
+        self._edit_state["text"] = text_value[:cursor] + text_value[cursor + 1 :]
+        self._update_edit_label()
+
+    def _edit_select_all(self) -> None:
+        if self._edit_state is None:
+            return
+        state = self._edit_state
+        state["selection_anchor"] = 0
+        state["cursor"] = len(state["text"])
+        self._update_edit_label()
+
+    def _update_edit_label(self) -> None:
         if self._edit_state is None:
             return
         tree_node = self._edit_state["tree_node"]
-        buffer = self._edit_state["buffer"]
         kind = self._edit_state["kind"]
-        initial = self._edit_state["initial"]
+        text_value: str = self._edit_state["text"]
+        cursor: int = self._edit_state["cursor"]
+        anchor = self._edit_state.get("selection_anchor")
+        selection: Optional[tuple[int, int]] = None
+        if anchor is not None and anchor != cursor:
+            selection = (min(anchor, cursor), max(anchor, cursor))
         caret = "▌"
-        if kind == "body_line":
-            if select_all and not buffer:
-                highlight = Text(f"  {initial}", style="reverse dim italic") if initial else Text("  ", style="reverse dim italic")
-                highlight.append(caret, style="dim italic")
-                tree_node.set_label(highlight)
-            else:
-                display_text = buffer if buffer else initial
-                display = f"  {display_text}" if display_text else "  "
-                tree_node.set_label(Text(display + caret, style="dim italic"))
-        else:
-            if select_all and not buffer:
-                highlight = Text(initial or "", style="reverse")
-                highlight.append(caret)
-                tree_node.set_label(highlight)
-            else:
-                tree_node.set_label(Text((buffer or initial) + caret))
+        prefix = "  " if kind == "body_line" else ""
+        base_style = "dim italic" if kind == "body_line" else None
+        highlight_style = f"{base_style} reverse" if base_style else "reverse"
+        caret_style = base_style
+
+        label = Text()
+        if prefix:
+            label.append(prefix, style=base_style)
+
+        caret_inserted = False
+        if cursor == 0:
+            label.append(caret, style=caret_style)
+            caret_inserted = True
+
+        for index, character in enumerate(text_value):
+            if not caret_inserted and cursor == index:
+                label.append(caret, style=caret_style)
+                caret_inserted = True
+            char_style = base_style
+            if selection and selection[0] <= index < selection[1]:
+                char_style = highlight_style
+            label.append(character, style=char_style)
+
+        if not caret_inserted:
+            label.append(caret, style=caret_style)
+
+        tree_node.set_label(label)
         self.require_tree().refresh(layout=True)
 
     def _handle_edit_key(self, event: events.Key) -> None:
         if self._edit_state is None:
             return
-        key = event.key
-        if key == "escape":
+        key_name, modifiers = _key_name_and_modifiers(event.key)
+        shift_held = "shift" in modifiers
+        control_held = bool({"ctrl", "control", "cmd", "command", "meta"} & modifiers)
+        if key_name == "escape":
             self._cancel_inline_edit()
             event.stop()
             return
-        if key == "enter":
+        if key_name == "enter":
             self._commit_inline_edit()
             event.stop()
             return
-        if key == "backspace":
-            buffer = self._edit_state["buffer"]
-            if buffer:
-                self._edit_state["buffer"] = buffer[:-1]
-                self._update_edit_label()
+        if key_name == "backspace":
+            self._edit_backspace()
+            event.stop()
+            return
+        if key_name == "delete":
+            self._edit_delete_forward()
+            event.stop()
+            return
+        if key_name in {"left", "right"}:
+            delta = -1 if key_name == "left" else 1
+            self._edit_move_cursor(delta=delta, extend=shift_held)
+            event.stop()
+            return
+        if key_name == "home":
+            self._edit_move_cursor(to=0, extend=shift_held)
+            event.stop()
+            return
+        if key_name == "end":
+            self._edit_move_cursor(to=len(self._edit_state["text"]), extend=shift_held)
+            event.stop()
+            return
+        if key_name == "tab":
+            event.stop()
+            return
+        if key_name == "a" and control_held:
+            self._edit_select_all()
             event.stop()
             return
         character = event.character
         if event.is_printable and character and len(character) == 1:
-            self._edit_state["buffer"] += character
-            self._update_edit_label()
+            self._edit_insert_text(character)
             event.stop()
             return
         # ignore other keys
@@ -443,11 +704,12 @@ class MindmapApp(App[None]):
     def _commit_inline_edit(self) -> None:
         if self._edit_state is None:
             return
-        buffer = self._edit_state["buffer"].strip()
+        text_value = self._edit_state["text"].strip()
         initial = (self._edit_state.get("initial") or "").strip()
         kind = self._edit_state["kind"]
         tree_node = self._edit_state["tree_node"]
         context = self._edit_state["context"]
+        tree = self.require_tree()
 
         if kind == "body_line":
             parent_node: MindmapNode = context["parent_node"]  # type: ignore[assignment]
@@ -456,11 +718,10 @@ class MindmapApp(App[None]):
             lines = self._body_lines(parent_node.body or "")
             while len(lines) <= line_index:
                 lines.append("")
-            new_line_value = buffer if buffer else initial
+            new_line_value = text_value
             lines[line_index] = new_line_value
             updated_body = "\n".join(lines).strip()
             parent_node.body = updated_body[:200]
-            tree = self.require_tree()
             parent_tree_node = tree.get_node_by_id(parent_tree_node_id) or tree.root
             parent_tree_node.expand()
             tree.refresh(layout=True)
@@ -479,14 +740,17 @@ class MindmapApp(App[None]):
                 tree.select_node(target_node)
             else:
                 tree.select_node(parent_tree_node)
+            tree.focus()
             self.populate_tree(parent_tree_node, parent_node)
             self.show_status("Text updated.")
         else:
             node: MindmapNode = context["node"]  # type: ignore[assignment]
-            new_title = buffer or initial or node.title
+            new_title = text_value or initial or node.title
             node.title = new_title
             tree_node.set_label(self._format_node_label(node))
-            self.require_tree().refresh(layout=True)
+            tree.refresh(layout=True)
+            tree.select_node(tree_node)
+            tree.focus()
             self.show_status("Node title updated.")
 
         self._edit_state = None
@@ -548,6 +812,8 @@ class MindmapApp(App[None]):
             model_node.title,
             context_markdown=context,
         )
+        if paragraph is None:
+            return
         if not isinstance(paragraph, str):
             self.show_status(f"No text returned for {model_node.title}.")
             return
@@ -580,6 +846,48 @@ class MindmapApp(App[None]):
                 leaves.append((node, data))
         return leaves
 
+    def _start_full_task(self, coro: Awaitable[None], *, label: str) -> None:
+        if self._full_task and not self._full_task.done():
+            self.bell()
+            self.show_status(f"{label} already running.")
+            return
+        task: asyncio.Task[None] = asyncio.create_task(coro)
+        self._full_task = task
+
+        def _on_done(completed: asyncio.Task[None]) -> None:
+            if self._full_task is completed:
+                self._full_task = None
+            if completed.cancelled():
+                return
+            exc = completed.exception()
+            if exc is not None:
+                self.bell()
+                self.show_status(f"{label} error: {exc}")
+
+        task.add_done_callback(_on_done)
+
+    def _resolve_pending_node(
+        self, pending: Optional[dict[str, object]]
+    ) -> Optional[Tree.Node[MindmapNode]]:
+        if not isinstance(pending, dict):
+            return None
+        tree = self.require_tree()
+        pending_node = pending.get("node_ref") if isinstance(pending, dict) else None
+        target_node = pending_node if isinstance(pending_node, TreeNode) else None
+        node_id = pending.get("node_id") if isinstance(pending, dict) else None
+        if target_node is None and node_id is not None:
+            try:
+                target_node = tree.get_node_by_id(node_id)
+            except UnknownNodeID:
+                target_node = None
+        if target_node is None:
+            target_node = tree.root
+        if target_node is tree.root and not isinstance(target_node.data, MindmapNode):
+            target_node.data = self.mindmap_root
+        if target_node is None or not isinstance(target_node.data, MindmapNode):
+            return None
+        return target_node
+
     async def _generate_text_for_leaves(
         self,
         root_tree_node: Tree.Node[MindmapNode],
@@ -599,19 +907,32 @@ class MindmapApp(App[None]):
         if not pending_leaves:
             self.show_status("All leaf nodes already have text.")
             return
-        self._full_in_progress = True
-        tree = self.require_tree()
-        root_tree_node.expand_all()
-        self._select_tree_node_without_toggle(root_tree_node)
-        tree.refresh(layout=True)
-        completed = 0
-        try:
-            for leaf_node, leaf_model in pending_leaves:
-                leaf_node.expand_all()
-                await self._generate_body_for_node(leaf_node, leaf_model)
-                completed += 1
-        finally:
-            self._full_in_progress = False
+        with self._prompt_log_session("Generate leaf text"):
+            self._full_in_progress = True
+            self._stop_after_current_step = False
+            tree = self.require_tree()
+            root_tree_node.expand_all()
+            self._select_tree_node_without_toggle(root_tree_node)
+            tree.refresh(layout=True)
+            completed = 0
+            cancelled = False
+            try:
+                for leaf_node, leaf_model in pending_leaves:
+                    if self._stop_after_current_step:
+                        cancelled = True
+                        break
+                    leaf_node.expand_all()
+                    await self._generate_body_for_node(leaf_node, leaf_model)
+                    completed += 1
+            finally:
+                self._full_in_progress = False
+        if cancelled:
+            self._stop_after_current_step = False
+            root_tree_node.expand_all()
+            self._select_tree_node_without_toggle(root_tree_node)
+            tree.refresh(layout=True)
+            self.show_status(f"Stopped after creating {completed} text section{'s' if completed != 1 else ''}.")
+            return
         root_tree_node.expand_all()
         self._select_tree_node_without_toggle(root_tree_node)
         tree.refresh(layout=True)
@@ -636,26 +957,17 @@ class MindmapApp(App[None]):
         if key.lower() == "t":
             pending = self._full_pending
             self._full_pending = None
-            tree = self.require_tree()
-            pending_node = pending.get("node_ref") if isinstance(pending, dict) else None
-            target_node = pending_node if isinstance(pending_node, TreeNode) else None
-            node_id = pending.get("node_id") if isinstance(pending, dict) else None
-            if target_node is None and node_id is not None:
-                try:
-                    target_node = tree.get_node_by_id(node_id)
-                except UnknownNodeID:
-                    target_node = None
+            target_node = self._resolve_pending_node(pending)
             if target_node is None:
-                target_node = tree.root
-            if target_node is tree.root and not isinstance(target_node.data, MindmapNode):
-                target_node.data = self.mindmap_root
-            if target_node is None or not isinstance(target_node.data, MindmapNode):
                 self.bell()
                 self.show_status("Selected node no longer available.")
                 event.stop()
                 return True
             event.stop()
-            await self._generate_text_for_leaves(target_node)
+            self._start_full_task(
+                self._generate_text_for_leaves(target_node),
+                label="Text generation",
+            )
             return True
         if key.isdigit() and key != "0":
             depth = int(key)
@@ -666,26 +978,17 @@ class MindmapApp(App[None]):
                 return True
             pending = self._full_pending
             self._full_pending = None
-            tree = self.require_tree()
-            pending_node = pending.get("node_ref") if isinstance(pending, dict) else None
-            target_node = pending_node if isinstance(pending_node, TreeNode) else None
-            node_id = pending.get("node_id") if isinstance(pending, dict) else None
-            if target_node is None and node_id is not None:
-                try:
-                    target_node = tree.get_node_by_id(node_id)
-                except UnknownNodeID:
-                    target_node = None
+            target_node = self._resolve_pending_node(pending)
             if target_node is None:
-                target_node = tree.root
-            if target_node is tree.root and not isinstance(target_node.data, MindmapNode):
-                target_node.data = self.mindmap_root
-            if target_node is None or not isinstance(target_node.data, MindmapNode):
                 self.bell()
                 self.show_status("Selected node no longer available.")
                 event.stop()
                 return True
             event.stop()
-            await self._execute_full_build(target_node, depth)
+            self._start_full_task(
+                self._execute_full_build(target_node, depth),
+                label="Full build",
+            )
             return True
         # consume unexpected keys while pending
         self.bell()
@@ -717,21 +1020,24 @@ class MindmapApp(App[None]):
 
         spinner_timer = self.set_interval(0.25, tick)
         task = asyncio.create_task(asyncio.to_thread(callable_, *args, **kwargs))
-        self._active_ai_task = task
+        result: object | None = None
         try:
             result = await task
         except asyncio.CancelledError:
             self.show_status("AI request cancelled.")
-            raise
+            result = None
         except Exception as exc:  # pragma: no cover - defensive programming
             self.handle_ai_error(label, exc)
-            result = None
         finally:
             spinner_timer.stop()
             spinner_node.remove()
             tree.refresh(layout=True)
-            self._active_ai_task = None
         return result
+
+    def handle_ai_error(self, action_label: str, exc: Exception) -> None:
+        """Provide a consistent error experience for AI failures."""
+        self.bell()
+        self.show_status(f"{action_label.capitalize()} failed: {exc}")
 
     async def _full_generate_recursive(
         self,
@@ -739,7 +1045,7 @@ class MindmapApp(App[None]):
         model_node: MindmapNode,
         depth_remaining: int,
     ) -> None:
-        if depth_remaining <= 0:
+        if depth_remaining <= 0 or self._stop_after_current_step:
             return
 
         context = self._contextual_markdown()
@@ -750,6 +1056,10 @@ class MindmapApp(App[None]):
             model_node.title,
             context_markdown=context,
         )
+        if child_titles is None:
+            return
+        if self._stop_after_current_step:
+            return
         if not child_titles:
             self.show_status(f"Full build: no children for {model_node.title}.")
             return
@@ -762,6 +1072,8 @@ class MindmapApp(App[None]):
         self.require_tree().refresh(layout=True)
 
         for child_tree_node in list(tree_node.children):
+            if self._stop_after_current_step:
+                return
             child_data = child_tree_node.data
             if isinstance(child_data, MindmapNode):
                 await self._full_generate_recursive(
@@ -782,17 +1094,23 @@ class MindmapApp(App[None]):
             self.bell()
             self.show_status("Full build requires a node selection.")
             return
-        self._full_in_progress = True
-        self._select_tree_node_without_toggle(tree_node)
-        self.show_status(f"Full build to depth {depth} in progress…")
-        try:
-            await self._full_generate_recursive(tree_node, data, depth)
-            tree_node.expand_all()
-            self.require_tree().refresh(layout=True)
+        with self._prompt_log_session(f"Full build depth {depth}"):
+            self._full_in_progress = True
+            self._stop_after_current_step = False
             self._select_tree_node_without_toggle(tree_node)
-            self.show_status(f"Full build complete to depth {depth}.")
-        finally:
-            self._full_in_progress = False
+            self.show_status(f"Full build to depth {depth} in progress…")
+            try:
+                await self._full_generate_recursive(tree_node, data, depth)
+                tree_node.expand_all()
+                self.require_tree().refresh(layout=True)
+                self._select_tree_node_without_toggle(tree_node)
+            finally:
+                self._full_in_progress = False
+        if self._stop_after_current_step:
+            self._stop_after_current_step = False
+            self.show_status("Full build cancelled.")
+            return
+        self.show_status(f"Full build complete to depth {depth}.")
 
     async def action_add_child_suggestion(self) -> None:
         selected_tree_node = self.get_selected_tree_node()
@@ -809,32 +1127,17 @@ class MindmapApp(App[None]):
 
         target_node_id = target_tree_node.id
         context = self._contextual_markdown()
-        tree = self.require_tree()
-        spinner_frames = ["  .", "  ..", "  ..."]
-        spinner_index = 0
-        spinner_node = target_tree_node.add_leaf(Text(spinner_frames[0], style="dim italic"))
-        spinner_node.allow_expand = False
-        target_tree_node.expand()
-        tree.refresh(layout=True)
-
-        def tick() -> None:
-            nonlocal spinner_index
-            spinner_index = (spinner_index + 1) % len(spinner_frames)
-            spinner_node.set_label(Text(spinner_frames[spinner_index], style="dim italic"))
-            tree.refresh(layout=False)
-
-        spinner_timer = self.set_interval(0.25, tick)
-        try:
-            suggestions = await asyncio.to_thread(
-                ai.generate_children, model_node.title, 1, context_markdown=context
+        with self._prompt_log_session("Add child suggestion"):
+            suggestions = await self._call_ai_with_spinner(
+                target_tree_node,
+                "add child suggestion",
+                ai.generate_children,
+                model_node.title,
+                1,
+                context_markdown=context,
             )
-        except Exception as exc:  # pragma: no cover - defensive programming
-            self.handle_ai_error("add child suggestion", exc)
-            suggestions = []
-        finally:
-            spinner_timer.stop()
-            spinner_node.remove()
-            tree.refresh(layout=True)
+        if suggestions is None:
+            return
 
         if not suggestions:
             self.show_status("No suggestion returned.")
@@ -852,12 +1155,66 @@ class MindmapApp(App[None]):
         model_node.children.append(MindmapNode(new_title))
         self.populate_tree(target_tree_node, model_node)
 
+        tree = self.require_tree()
         refreshed_parent = tree.get_node_by_id(target_node_id) or tree.root
         refreshed_parent.expand()
         self._select_tree_node_without_toggle(refreshed_parent)
         tree.refresh(layout=True)
         tree.focus()
         self.show_status(f"Added child '{new_title}'.")
+
+    def action_add_manual_child(self) -> None:
+        if self._edit_state is not None:
+            self.bell()
+            self.show_status("Finish editing before adding a node.")
+            return
+        selected_tree_node = self.get_selected_tree_node()
+        if selected_tree_node is None:
+            self.bell()
+            self.show_status("No node selected.")
+            return
+
+        target_tree_node, model_node = self._resolve_model_tree_node(selected_tree_node)
+        if target_tree_node is None or model_node is None:
+            self.bell()
+            self.show_status("Cannot add a child to this entry.")
+            return
+
+        new_title = self._unique_child_title("New idea", model_node)
+        new_node = MindmapNode(new_title)
+        model_node.children.append(new_node)
+        self.populate_tree(target_tree_node, model_node)
+
+        tree = self.require_tree()
+        target_tree_node.expand()
+        tree.refresh(layout=True)
+
+        new_tree_node = next(
+            (child for child in target_tree_node.children if child.data is new_node), None
+        )
+        if new_tree_node is None:
+            self._select_tree_node_without_toggle(target_tree_node)
+            self.show_status("Added child node.")
+            return
+
+        tree.select_node(new_tree_node)
+        tree.focus()
+        self._start_inline_edit(new_tree_node, new_node.title, kind="title", context={"node": new_node})
+
+    def _stop_generation(self) -> bool:
+        handled = False
+        if self._full_pending is not None:
+            self._full_pending = None
+            self.show_status("Full build cancelled.")
+            handled = True
+        elif self._full_in_progress:
+            if not self._stop_after_current_step:
+                self._stop_after_current_step = True
+                self.show_status("Stopping after the current step completes…")
+            else:
+                self.show_status("Stop already requested; waiting for current step.")
+            handled = True
+        return handled
 
     def action_remove_child_suggestion(self) -> None:
         selected_tree_node = self.get_selected_tree_node()
@@ -932,35 +1289,18 @@ class MindmapApp(App[None]):
             return
         model_node = selected_tree_node.data
         context = self._contextual_markdown()
-        tree = self.require_tree()
-        spinner_frames = ["  .", "  ..", "  ..."]
-        spinner_index = 0
-        spinner_node = selected_tree_node.add_leaf(Text(spinner_frames[0], style="dim italic"))
-        selected_tree_node.expand()
-        tree.refresh(layout=True)
-
-        def tick() -> None:
-            nonlocal spinner_index
-            spinner_index = (spinner_index + 1) % len(spinner_frames)
-            spinner_node.set_label(Text(spinner_frames[spinner_index], style="dim italic"))
-            tree.refresh(layout=False)
-
-        spinner_timer = self.set_interval(0.25, tick)
-        try:
-            child_titles = await asyncio.to_thread(
+        with self._prompt_log_session("Generate children"):
+            child_titles = await self._call_ai_with_spinner(
+                selected_tree_node,
+                "generate child nodes",
                 ai.generate_children,
                 model_node.title,
                 count,
                 context_markdown=context,
                 reset_counter=True,
             )
-        except Exception as exc:  # pragma: no cover - defensive programming
-            self.handle_ai_error("generate child nodes", exc)
-            child_titles = []
-        finally:
-            spinner_timer.stop()
-            spinner_node.remove()
-            tree.refresh(layout=True)
+        if child_titles is None:
+            return
         if not child_titles:
             self.show_status("No child titles returned.")
             return
@@ -977,30 +1317,16 @@ class MindmapApp(App[None]):
             return
         model_node = selected_tree_node.data
         context = self._contextual_markdown()
-        tree = self.require_tree()
-        spinner_frames = ["  .", "  ..", "  ..."]
-        spinner_index = 0
-        spinner_node = selected_tree_node.add_leaf(Text(spinner_frames[0], style="dim italic"))
-        selected_tree_node.expand()
-        tree.refresh(layout=True)
-
-        def tick() -> None:
-            nonlocal spinner_index
-            spinner_index = (spinner_index + 1) % len(spinner_frames)
-            spinner_node.set_label(Text(spinner_frames[spinner_index], style="dim italic"))
-            tree.refresh(layout=False)
-
-        spinner_timer = self.set_interval(0.25, tick)
-        try:
-            child_titles = await asyncio.to_thread(
-                ai.generate_children_auto, model_node.title, context_markdown=context
+        with self._prompt_log_session("Auto-generate children"):
+            child_titles = await self._call_ai_with_spinner(
+                selected_tree_node,
+                "generate child nodes",
+                ai.generate_children_auto,
+                model_node.title,
+                context_markdown=context,
             )
-        except Exception as exc:  # pragma: no cover - defensive programming
-            self.handle_ai_error("generate child nodes", exc)
-            child_titles = []
-        finally:
-            spinner_timer.stop()
-            spinner_node.remove()
+        if child_titles is None:
+            return
         if not child_titles:
             self.show_status("No child titles returned.")
             return
@@ -1046,12 +1372,6 @@ class MindmapApp(App[None]):
                 self.show_status("Context unchanged.")
                 return
             action = result.get("action")
-            if action == "reset":
-                had_context = self._has_external_context()
-                self._set_external_context("")
-                message = "External context reset." if had_context else "No external context to reset."
-                self.show_status(message)
-                return
             if action == "apply":
                 previous = self._external_context
                 next_value = result.get("text", "")
@@ -1066,6 +1386,19 @@ class MindmapApp(App[None]):
             self.show_status("Context unchanged.")
 
         self.push_screen(ContextEditorScreen(self._external_context), apply_context)
+
+    def action_import_web_context(self) -> None:
+        def apply_url(result: dict[str, str] | None) -> None:
+            if not isinstance(result, dict) or result.get("action") != "fetch":
+                self.show_status("URL import cancelled.")
+                return
+            url_value = result.get("url", "").strip()
+            if not url_value:
+                self.show_status("URL import cancelled.")
+                return
+            asyncio.create_task(self._import_context_from_url(url_value))
+
+        self.push_screen(URLImportScreen(self._context_url), apply_url)
 
     def action_edit_node(self) -> None:
         if self._edit_state is not None:
@@ -1111,50 +1444,19 @@ class MindmapApp(App[None]):
             self.show_status("No node selected.")
             return
         model_node = selected_tree_node.data
-        context = self._contextual_markdown()
-        tree = self.require_tree()
-        spinner_frames = ["  .", "  ..", "  ..."]
-        spinner_index = 0
-        spinner_node = selected_tree_node.add_leaf(Text(spinner_frames[0], style="dim italic"))
-        selected_tree_node.expand()
-        tree.refresh(layout=True)
-
-        def tick() -> None:
-            nonlocal spinner_index
-            spinner_index = (spinner_index + 1) % len(spinner_frames)
-            spinner_node.set_label(Text(spinner_frames[spinner_index], style="dim italic"))
-            tree.refresh(layout=False)
-
-        spinner_timer = self.set_interval(0.25, tick)
-        try:
-            paragraph = await asyncio.to_thread(
-                ai.generate_paragraph, model_node.title, context_markdown=context
-            )
-        except Exception as exc:  # pragma: no cover - defensive programming
-            self.handle_ai_error("generate paragraph", exc)
-            return
-        finally:
-            spinner_timer.stop()
-            spinner_node.remove()
-            tree.refresh(layout=True)
-        paragraph = paragraph.strip()
-        if not paragraph:
-            self.show_status("No text returned.")
-            return
-        model_node.body = paragraph
-        line_count = len(self._body_lines(model_node.body))
-        self.populate_tree(selected_tree_node, model_node)
-        selected_tree_node.expand()
-        self.require_tree().refresh(layout=True)
-        self.show_status(
-            f"Stored {line_count} text line{'s' if line_count != 1 else ''} for {model_node.title}."
-        )
+        with self._prompt_log_session("Generate body text"):
+            await self._generate_body_for_node(selected_tree_node, model_node)
 
     async def on_event(self, event: events.Event) -> None:  # noqa: D401
         if isinstance(event, events.Key):
             if self._edit_state is not None:
                 self._handle_edit_key(event)
                 return
+            key_name, _ = _key_name_and_modifiers(event.key)
+            if key_name == "escape":
+                if self._stop_generation():
+                    event.stop()
+                    return
             if await self._handle_full_pending_key(event):
                 return
         await super().on_event(event)

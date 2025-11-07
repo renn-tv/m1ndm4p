@@ -1,7 +1,10 @@
 import json
 import os
 import re
+import threading
 from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
 from typing import DefaultDict, Optional
 from urllib import error, request
 
@@ -38,6 +41,99 @@ AVAILABLE_MODELS = [OFFLINE_MODEL, *_NETWORK_MODELS]
 DEFAULT_MODEL = _NETWORK_MODELS[0]
 _dummy_generation = 0
 _dummy_counters: DefaultDict[tuple[str, int, int], int] = defaultdict(int)
+_PROMPT_LOG_PATH = Path("prompt.log")
+_prompt_log_lock = threading.Lock()
+_force_new_prompt_task = True
+_current_task_prompt_count = 0
+_next_task_label: Optional[str] = None
+_CONNECTION_LOG_PATH = Path("connection.log")
+_connection_log_lock = threading.Lock()
+
+
+def _reset_prompt_state_locked() -> None:
+    global _force_new_prompt_task, _current_task_prompt_count, _next_task_label
+    _force_new_prompt_task = True
+    _current_task_prompt_count = 0
+    _next_task_label = None
+
+
+def reset_prompt_log() -> None:
+    with _prompt_log_lock:
+        _PROMPT_LOG_PATH.write_text("", encoding="utf-8")
+        _reset_prompt_state_locked()
+
+
+def reset_connection_log() -> None:
+    with _connection_log_lock:
+        _CONNECTION_LOG_PATH.write_text("", encoding="utf-8")
+
+
+def start_prompt_session(label: str | None = None) -> None:
+    global _force_new_prompt_task, _current_task_prompt_count, _next_task_label
+    with _prompt_log_lock:
+        _force_new_prompt_task = True
+        _current_task_prompt_count = 0
+        _next_task_label = label
+
+
+def finish_prompt_session() -> None:
+    global _force_new_prompt_task, _current_task_prompt_count, _next_task_label
+    with _prompt_log_lock:
+        _reset_prompt_state_locked()
+
+
+def _ensure_prompt_header_locked() -> None:
+    global _force_new_prompt_task, _current_task_prompt_count, _next_task_label
+    if not _force_new_prompt_task:
+        return
+    size = _PROMPT_LOG_PATH.stat().st_size if _PROMPT_LOG_PATH.exists() else 0
+    with _PROMPT_LOG_PATH.open("a", encoding="utf-8") as log:
+        if size:
+            log.write("=====\n")
+    _force_new_prompt_task = False
+    _next_task_label = None
+    _current_task_prompt_count = 0
+
+
+def _log_prompt_exchange(prompt: str, response_raw: str | None, error: str | None) -> None:
+    prompt_text = prompt.strip()
+    if not prompt_text:
+        prompt_text = "<empty prompt>"
+    response_text = (response_raw or "").strip()
+    global _current_task_prompt_count
+    prompt_timestamp = datetime.now().isoformat(timespec="seconds")
+    with _prompt_log_lock:
+        _ensure_prompt_header_locked()
+        with _PROMPT_LOG_PATH.open("a", encoding="utf-8") as log:
+            if _current_task_prompt_count:
+                log.write("----\n")
+            entry_no = _current_task_prompt_count + 1
+            log.write(f"m1ndm4p [{prompt_timestamp}] Prompt {entry_no}:\n")
+            log.write("------------------------------------------------------------\n")
+            log.write(f"{prompt_text}\n")
+            log.write("============================================================\n")
+            response_timestamp = datetime.now().isoformat(timespec="seconds")
+            log.write(f"{get_active_model()} [{response_timestamp}] Response {entry_no}:\n")
+            log.write("------------------------------------------------------------\n")
+            if error:
+                log.write(f"<error> {error}\n")
+            elif response_text:
+                log.write(f"{response_text}\n")
+            else:
+                log.write("<empty>\n")
+            log.write("============================================================\n")
+        _current_task_prompt_count += 1
+
+
+def _log_connection_event(status: str, model: str, detail: str | None = None) -> None:
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    message = detail.strip() if detail else ""
+    line = f"{timestamp}\t{status.upper()}\t{model}"
+    if message:
+        line = f"{line}\t{message}"
+    with _connection_log_lock:
+        with _CONNECTION_LOG_PATH.open("a", encoding="utf-8") as log:
+            log.write(line + "\n")
 
 
 def get_active_model() -> str:
@@ -88,13 +184,35 @@ def _sync_dummy_counter(level: int, context_markdown: str | None) -> None:
         _dummy_counters[key] = baseline
 
 
-def _post_openrouter(model: str, messages: list[dict]) -> Optional[dict]:
-    if model == OFFLINE_MODEL:
+def _normalize_context_text(context_markdown: str | None) -> Optional[str]:
+    if not context_markdown:
         return None
+    lines: list[str] = []
+    previous_blank = False
+    for raw_line in context_markdown.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            if previous_blank:
+                continue
+            previous_blank = True
+            lines.append("")
+        else:
+            previous_blank = False
+            lines.append(stripped)
+    normalized = "\n".join(lines).strip()
+    return normalized or None
+
+
+def _post_openrouter(
+    model: str, messages: list[dict]
+) -> tuple[Optional[dict], Optional[str], Optional[str]]:
+    if model == OFFLINE_MODEL:
+        return None, "offline model", None
 
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
-        return None
+        return None, "missing api key", None
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -113,19 +231,21 @@ def _post_openrouter(model: str, messages: list[dict]) -> Optional[dict]:
         headers=headers,
         method="POST",
     )
+    raw_payload: Optional[str] = None
     try:
         with request.urlopen(http_request, timeout=30) as response:
             status = getattr(response, "status", 200)
             if not 200 <= status < 300:
-                return None
-            payload = response.read().decode("utf-8")
-    except (error.URLError, error.HTTPError, TimeoutError):
-        return None
+                return None, f"HTTP {status}", None
+            raw_payload = response.read().decode("utf-8")
+    except (error.URLError, error.HTTPError, TimeoutError) as exc:
+        return None, str(exc), raw_payload
 
     try:
-        return json.loads(payload)
-    except json.JSONDecodeError:
-        return None
+        parsed = json.loads(raw_payload or "")
+    except json.JSONDecodeError as exc:
+        return None, f"invalid JSON: {exc}", raw_payload
+    return parsed, None, raw_payload
 
 
 def _extract_text(response: dict) -> Optional[str]:
@@ -141,10 +261,21 @@ def _extract_text(response: dict) -> Optional[str]:
 
 def _call_openrouter(prompt: str) -> Optional[str]:
     model = get_active_model()
-    response = _post_openrouter(model, [{"role": "user", "content": prompt}])
-    if not response:
+    response_payload, error, raw_payload = _post_openrouter(
+        model, [{"role": "user", "content": prompt}]
+    )
+    if error:
+        _log_connection_event("FAIL", model, error)
+    else:
+        _log_connection_event("SUCCESS", model)
+    raw_for_log = raw_payload
+    if raw_for_log is None and response_payload is not None:
+        raw_for_log = json.dumps(response_payload, ensure_ascii=False)
+    completion_text = _extract_text(response_payload) if response_payload else None
+    _log_prompt_exchange(prompt, raw_for_log, error)
+    if not response_payload:
         return None
-    return _extract_text(response)
+    return completion_text
 
 
 def _reset_level_counter(level: int) -> None:
@@ -170,7 +301,8 @@ def generate_children(
             _sync_dummy_counter(level, context_markdown)
         return [_dummy_child_title(level) for _ in range(n)]
 
-    context = f"\n\nContext:\n{context_markdown}" if context_markdown else ""
+    context_text = _normalize_context_text(context_markdown)
+    context = f"\n\nContext:\n{context_text}" if context_text else ""
     prompt = (
         "You are helping to brainstorm ideas for a mind map. "
         "Provide exactly {n} concise child node titles for the node titled '{title}'. "
@@ -207,7 +339,8 @@ def generate_children_auto(node_title: str, context_markdown: str | None = None)
             reset_counter=True,
         )
 
-    context = f"\n\nContext:\n{context_markdown}" if context_markdown else ""
+    context_text = _normalize_context_text(context_markdown)
+    context = f"\n\nContext:\n{context_text}" if context_text else ""
     prompt = (
         "Based on the existing mind map, suggest a sensible set of child nodes for '{title}'. "
         "Return between 2 and 6 concise titles that add meaningful detail. "
@@ -235,7 +368,8 @@ def generate_paragraph(node_title: str, context_markdown: str | None = None) -> 
     if not api_key:
         return f"A brief paragraph about {node_title}."
 
-    context = f"\n\nContext:\n{context_markdown}" if context_markdown else ""
+    context_text = _normalize_context_text(context_markdown)
+    context = f"\n\nContext:\n{context_text}" if context_text else ""
     prompt = (
         "Write a single concise paragraph (~200 characters) for the mind map node titled '{title}'. "
         "Avoid headings or lists and keep the tone informative.{context}"
