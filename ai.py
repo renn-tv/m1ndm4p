@@ -11,6 +11,7 @@ from urllib import error, request
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 OFFLINE_MODEL = "No AI (offline dummy output)"
 _NETWORK_MODELS = [
+    "openrouter/polaris-alpha",
     "alibaba/tongyi-deepresearch-30b-a3b:free",
     "deepseek/deepseek-r1-0528-qwen3-8b:free",
     "google/gemini-2.0-flash-exp:free",
@@ -306,7 +307,9 @@ def generate_children(
     prompt = (
         "You are helping to brainstorm ideas for a mind map. "
         "Provide exactly {n} concise child node titles for the node titled '{title}'. "
-        "Each title must be on its own line with no numbering or bullets.{context}"
+        "Each title should feel natural but stay within roughly 50 characters—use a short phrase or even a single word if that best captures the idea. "
+        "When a concrete supporting detail (a statistic, outcome, or specific example) would clarify the idea, emit that detail as the node instead of another abstract heading. "
+        "List each title on its own line with no numbering or bullets.{context}"
     ).format(n=n, title=node_title, context=context)
 
     result = _call_openrouter(prompt)
@@ -342,9 +345,11 @@ def generate_children_auto(node_title: str, context_markdown: str | None = None)
     context_text = _normalize_context_text(context_markdown)
     context = f"\n\nContext:\n{context_text}" if context_text else ""
     prompt = (
-        "Based on the existing mind map, suggest a sensible set of child nodes for '{title}'. "
-        "Return between 2 and 6 concise titles that add meaningful detail. "
-        "List each title on its own line with no numbering, bullets, or commentary.{context}"
+        "Act as a seasoned lecturer distilling the key takeaway for '{title}'. "
+        "Review the parent and its current children, then add anywhere from 0 to 10 new branches—but treat more than three as costly; exceed three only when an extra branch delivers indispensable new insight. "
+        "Skip anything redundant or slogan-like. Each heading must stand alone and encode the concrete answer (e.g., '1992 Market Share Surge', 'Metzeler R&D Partner', 'ISO 9001 Certification'); never pose a question. "
+        "Prefer ultra-short labels (single vivid words or ≤25 characters) and trust the human to branch further for detail. If no meaningful gaps remain, return nothing. "
+        "List each title on its own line with no numbering, bullets, or filler.{context}"
     ).format(title=node_title, context=context)
 
     result = _call_openrouter(prompt)
@@ -371,8 +376,9 @@ def generate_paragraph(node_title: str, context_markdown: str | None = None) -> 
     context_text = _normalize_context_text(context_markdown)
     context = f"\n\nContext:\n{context_text}" if context_text else ""
     prompt = (
-        "Write a single concise paragraph (~200 characters) for the mind map node titled '{title}'. "
-        "Avoid headings or lists and keep the tone informative.{context}"
+        "Write one informative sentence for the mind map node titled '{title}'. "
+        "Default to a brief result/event that feels natural in a mind map, but you may use up to 200 characters when a bit more detail adds clear value. "
+        "Do not exceed 200 characters, and avoid headings or lists.{context}"
     ).format(title=node_title, context=context)
 
     result = _call_openrouter(prompt)
@@ -380,4 +386,6 @@ def generate_paragraph(node_title: str, context_markdown: str | None = None) -> 
         return f"A brief paragraph about {node_title}."
 
     paragraph = " ".join(result.strip().split())
+    if len(paragraph) > 200:
+        paragraph = paragraph[:200].rstrip()
     return paragraph if paragraph else f"A brief paragraph about {node_title}."

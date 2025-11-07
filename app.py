@@ -170,8 +170,9 @@ class ContextEditorScreen(ModalScreen[dict[str, str] | None]):
         )
 
     def on_mount(self) -> None:
-        textarea = self.query_one("#context-editor-text", TextArea)
+        textarea = self.query_one("#context-editor-text", ContextTextArea)
         textarea.focus()
+        textarea.action_select_all()
 
     def _gather_text(self) -> str:
         textarea = self.query_one("#context-editor-text", ContextTextArea)
@@ -252,6 +253,7 @@ class MindmapApp(App[None]):
         Binding("t", "generate_body", "(text)"),
         Binding("e", "edit_node", "(edit)"),
         Binding("i", "edit_context", "Context"),
+        Binding("l", "level_prompt", "Levels"),
         Binding("w", "import_web_context", "(web ctx)"),
         Binding("tab", "add_manual_child", "(manual +)", show=False, priority=True),
         Binding("a", "expand_all", "Expand All"),
@@ -284,6 +286,7 @@ class MindmapApp(App[None]):
         self._context_url = ""
         self._stop_after_current_step = False
         self._full_task: Optional[asyncio.Task[None]] = None
+        self._level_pending = False
         ai.reset_prompt_log()
         ai.reset_connection_log()
 
@@ -482,6 +485,27 @@ class MindmapApp(App[None]):
         tree_node.expand()
         tree.refresh(layout=True)
         return child_level
+
+    def _apply_level_limit(self, level_limit: int) -> None:
+        tree = self.require_tree()
+        root = tree.root
+        if level_limit <= 0:
+            root.expand_all()
+            tree.refresh(layout=True)
+            self.show_status("Showing all levels.")
+            return
+
+        def clamp(node: Tree.Node[MindmapNode], depth: int) -> None:
+            if depth >= level_limit:
+                node.collapse()
+            else:
+                node.expand()
+                for child in node.children:
+                    clamp(child, depth + 1)
+
+        clamp(root, 0)
+        tree.refresh(layout=True)
+        self.show_status(f"Showing levels ≤ {level_limit}.")
 
     def _start_inline_edit(
         self,
@@ -1387,6 +1411,18 @@ class MindmapApp(App[None]):
 
         self.push_screen(ContextEditorScreen(self._external_context), apply_context)
 
+    def action_level_prompt(self) -> None:
+        if self._level_pending:
+            self._level_pending = False
+            self.show_status("Level display unchanged.")
+            return
+        if self._full_pending is not None:
+            self.bell()
+            self.show_status("Finish pending requests before adjusting levels.")
+            return
+        self._level_pending = True
+        self.show_status("Levels: press 0 for all, or 1-9 for depth. Esc to cancel.")
+
     def action_import_web_context(self) -> None:
         def apply_url(result: dict[str, str] | None) -> None:
             if not isinstance(result, dict) or result.get("action") != "fetch":
@@ -1453,6 +1489,21 @@ class MindmapApp(App[None]):
                 self._handle_edit_key(event)
                 return
             key_name, _ = _key_name_and_modifiers(event.key)
+            if self._level_pending:
+                if key_name == "escape":
+                    self._level_pending = False
+                    self.show_status("Level display unchanged.")
+                    event.stop()
+                    return
+                if key_name.isdigit():
+                    depth = int(key_name)
+                    self._level_pending = False
+                    self._apply_level_limit(depth)
+                    event.stop()
+                    return
+                # consume other keys while waiting for level input
+                event.stop()
+                return
             if key_name == "escape":
                 if self._stop_generation():
                     event.stop()
