@@ -10,6 +10,8 @@ m1ndm4p is a Textual-based TUI for iterating on Markdown mind maps with optional
 - **AI assistant when you want it** – compare OpenRouter models, auto-generate concise nodes or body text.
 - **Manual mode always available** – every edit works offline; use AI only when you need a boost.
 
+![m1ndm4p demo](https://github.com/renn-tv/m1ndm4p/blob/main/m1ndm4p.gif)
+
 ## Prerequisites
 
 - Python 3.11+
