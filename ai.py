@@ -5,7 +5,7 @@ import threading
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import DefaultDict, Optional
+from typing import DefaultDict, Literal, Optional
 from urllib import error, request
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -152,37 +152,10 @@ def reset_dummy_counters() -> None:
     _dummy_counters.clear()
 
 
-def _infer_level_from_context(node_title: str, context_markdown: str | None) -> int:
-    if not context_markdown:
-        return 1
-    heading_pattern = re.compile(r"^(#+)\s+(.*)\s*$")
-    for line in context_markdown.splitlines():
-        match = heading_pattern.match(line)
-        if not match:
-            continue
-        hashes, title = match.groups()
-        if title.strip() == node_title.strip():
-            return max(len(hashes), 1)
-    return 1
-
-
 def _dummy_child_title(level: int) -> str:
     key = (get_active_model(), _dummy_generation, level)
     _dummy_counters[key] += 1
     return f"Level {level}, Node {_dummy_counters[key]}"
-
-
-def _sync_dummy_counter(level: int, context_markdown: str | None) -> None:
-    key = (get_active_model(), _dummy_generation, level)
-    baseline = 0
-    if context_markdown:
-        pattern = re.compile(rf"Level {level}, Node (\d+)")
-        matches = [int(match) for match in pattern.findall(context_markdown)]
-        if matches:
-            baseline = max(matches)
-    # Only update if the stored counter is lower than the baseline
-    if _dummy_counters[key] < baseline:
-        _dummy_counters[key] = baseline
 
 
 def _normalize_context_text(context_markdown: str | None) -> Optional[str]:
@@ -279,113 +252,284 @@ def _call_openrouter(prompt: str) -> Optional[str]:
     return completion_text
 
 
-def _reset_level_counter(level: int) -> None:
-    key = (get_active_model(), _dummy_generation, level)
-    _dummy_counters[key] = 0
+_AUTO_CHILD_LIMIT = 10
 
 
-def generate_children(
-    node_title: str,
-    n: int,
+def _structured_prompt(
+    node_path: list[str],
+    depth: int,
+    *,
+    include_body: bool,
+    mode: Literal["auto", "exact", "body"],
+    exact_children: int | None,
+    context_markdown: str | None,
+    level_targets: list[int] | None = None,
+) -> str:
+    normalized_context = _normalize_context_text(context_markdown)
+    context_block = f"\n\nKnown outline:\n{normalized_context}" if normalized_context else ""
+    root_title = node_path[-1]
+    breadcrumb = " > ".join(node_path)
+    current_level = max(len(node_path), 1)
+    max_heading_level = current_level + max(depth, 0)
+    heading_instruction = (
+        f"Begin with the heading level {current_level} (`{'#' * current_level}`) for '{root_title}'. "
+        f"Any children must use heading levels {current_level + 1} through {max_heading_level}."
+    )
+    targets = list(level_targets) if level_targets else []
+    if depth <= 0:
+        child_instruction = "Do not add any child headings; focus only on the current node."
+    elif targets:
+        target = targets[0]
+        child_instruction = (
+            f"Add exactly {target} direct child headings (level {current_level + 1}) under '{root_title}'. "
+            "Merge or split ideas so that each heading is meaningful, but do not add more or fewer entries."
+        )
+    elif mode == "exact" and exact_children is not None:
+        child_instruction = (
+            f"Add exactly {exact_children} direct child headings (level {current_level + 1}) under '{root_title}'. "
+            "Skip numbering or bullets. Only add grandchildren if depth allows and they clarify those children."
+        )
+    else:
+        child_instruction = (
+            f"Add between 0 and {_AUTO_CHILD_LIMIT} concise child headings (level {current_level + 1}). "
+            "Plan the entire subtree before you write: decide which ideas deserve deeper detail all the way to the requested depth, then emit everything in one response. "
+            "Skip the level entirely if nothing fresh is worth saying, and keep every label under 40 characters—think 2–4 word Pareto summaries, never sentences. "
+            "Only branch beyond the first level when doing so clearly improves understanding, and never exceed the requested depth."
+        )
+
+    if include_body:
+        body_instruction = (
+            "Only add sentences to leaf headings (those you do not expand further). For each leaf, add exactly one plain declarative sentence "
+            "(≤160 characters) immediately below it, separated by a blank line. Never place a sentence under a heading that still receives child headings. "
+            "Keep sentences factual—no hype, lists, or markdown embellishments."
+        )
+    else:
+        body_instruction = "Do not include any narrative paragraphs or bullet lists—headings only."
+
+    detail_instructions: list[str] = []
+    if targets:
+        for idx, target in enumerate(targets[1:], start=1):
+            parent_level = current_level + idx
+            child_level = parent_level + 1
+            detail_instructions.append(
+                f"Each level {parent_level} heading must include exactly {target} level {child_level} subheadings; "
+                "use concise labels and only skip a slot if absolutely no supporting ideas exist."
+            )
+        if len(targets) < max(depth, 0):
+            for offset in range(len(targets) + 1, max(depth, 0) + 1):
+                parent_level = current_level + offset
+                child_level = parent_level + 1
+                detail_instructions.append(
+                    f"Continue deepening the outline to level {child_level}; prefer completing depth {depth} wherever meaningful."
+                )
+    else:
+        for offset in range(1, max(depth, 0)):
+            parent_level = current_level + offset
+            child_level = parent_level + 1
+            detail_instructions.append(
+                f"Before writing level {parent_level} headings, consider which need level {child_level} detail so the final outline reaches the intended depth; "
+                f"whenever a concrete fact exists, add the level {child_level} child to reveal it. If absolutely nothing specific exists, leave the parent as a leaf, but prefer completing full depth when possible."
+            )
+    detail_instruction = "\n".join(detail_instructions)
+
+    target_instruction = ""
+    if targets:
+        lines = []
+        for idx, count in enumerate(targets, start=1):
+            level_no = current_level + idx
+            lines.append(f"- Level {level_no}: exactly {count} headings.")
+        target_instruction = "Target counts per depth:\n" + "\n".join(lines)
+
+    rules = (
+        "Rules: output only Markdown headings (with optional single sentences as described), "
+        "never emit numbered lists, bullets, code fences, or commentary. "
+        f"Stop once you reach heading level {max_heading_level}. "
+        "Never recreate ancestors or siblings outside the provided path."
+    )
+
+    return (
+        "You are expanding a structured Markdown outline based on the existing content.\n"
+        f"Current section path: {breadcrumb}\n"
+        f"{heading_instruction}\n"
+        f"{child_instruction}\n"
+        f"{detail_instruction}\n"
+        f"{target_instruction}\n"
+        f"{body_instruction}\n"
+        f"{rules}"
+        f"{context_block}"
+    )
+
+
+def _dummy_subtree_markdown(
+    node_path: list[str],
+    depth: int,
+    *,
+    include_body: bool,
+    exact_children: int | None,
+    level_targets: list[int] | None = None,
+) -> str:
+    current_level = max(len(node_path), 1)
+    root_title = node_path[-1]
+    lines: list[str] = [f"{'#' * current_level} {root_title}"]
+    if include_body:
+        lines.extend(
+            [
+                "",
+                f"Placeholder detail for {root_title}.",
+            ]
+        )
+
+    def build(level: int, remaining_depth: int, *, first_level: bool, target_index: int) -> None:
+        if remaining_depth <= 0:
+            return
+        if level_targets and target_index < len(level_targets):
+            child_count = max(level_targets[target_index], 0)
+        elif first_level and exact_children is not None:
+            child_count = max(exact_children, 0)
+        else:
+            child_count = 3
+        for _ in range(child_count):
+            title = _dummy_child_title(level + 1)
+            lines.append("")
+            lines.append(f"{'#' * (level + 1)} {title}")
+            if include_body:
+                lines.append("")
+                lines.append(f"{title} details pending.")
+            build(level + 1, remaining_depth - 1, first_level=False, target_index=target_index + 1)
+
+    build(current_level, depth, first_level=True, target_index=0)
+    text = "\n".join(lines).strip()
+    return f"{text}\n" if text else ""
+
+
+def generate_structured_subtree(
+    node_path: list[str],
+    depth: int,
     context_markdown: str | None = None,
     *,
-    reset_counter: bool = False,
-) -> list[str]:
+    include_body: bool = False,
+    mode: Literal["auto", "exact", "body"] = "auto",
+    exact_children: int | None = None,
+    level_targets: list[int] | None = None,
+) -> Optional[str]:
+    if not node_path:
+        raise ValueError("node_path must contain at least one title")
+    if depth < 0:
+        depth = 0
+    depth = min(depth, 5)
+    if mode == "exact" and (exact_children is None or depth == 0):
+        raise ValueError("exact mode requires depth >= 1 and exact_children to be set")
+    if mode == "body":
+        depth = 0
+        include_body = True
+
     api_key = os.getenv("OPENROUTER_API_KEY")
     active_model = get_active_model()
     uses_network = bool(api_key) and active_model != OFFLINE_MODEL
-    level = _infer_level_from_context(node_title, context_markdown)
-    if not uses_network or n <= 0:
-        if reset_counter:
-            _reset_level_counter(level)
-        else:
-            _sync_dummy_counter(level, context_markdown)
-        return [_dummy_child_title(level) for _ in range(n)]
 
-    context_text = _normalize_context_text(context_markdown)
-    context = f"\n\nContext:\n{context_text}" if context_text else ""
-    prompt = (
-        "You are helping to brainstorm ideas for a mind map. "
-        "Provide exactly {n} concise child node titles for the node titled '{title}'. "
-        "Each title should feel natural but stay within roughly 50 characters—use a short phrase or even a single word if that best captures the idea. "
-        "When a concrete supporting detail (a statistic, outcome, or specific example) would clarify the idea, emit that detail as the node instead of another abstract heading. "
-        "List each title on its own line with no numbering or bullets.{context}"
-    ).format(n=n, title=node_title, context=context)
+    prompt = _structured_prompt(
+        node_path,
+        depth,
+        include_body=include_body,
+        mode=mode,
+        exact_children=exact_children,
+        context_markdown=context_markdown,
+        level_targets=level_targets,
+    )
+    if not uses_network:
+        return _dummy_subtree_markdown(
+            node_path,
+            depth,
+            include_body=include_body,
+            exact_children=exact_children,
+            level_targets=level_targets,
+        )
 
     result = _call_openrouter(prompt)
-    if not result:
-        if reset_counter:
-            _reset_level_counter(level)
+    if result:
+        return result.strip()
+    return _dummy_subtree_markdown(
+        node_path,
+        depth,
+        include_body=include_body,
+        exact_children=exact_children,
+    )
+
+
+def generate_leaf_bodies(
+    entries: list[dict[str, object]],
+    context_markdown: str | None = None,
+) -> list[str]:
+    if not entries:
+        return []
+
+    normalized_context = _normalize_context_text(context_markdown)
+    context_block = f"\n\nExisting mind map:\n{normalized_context}" if normalized_context else ""
+    entry_lines: list[str] = []
+    for idx, entry in enumerate(entries, start=1):
+        path = entry.get("path", [])
+        if isinstance(path, list):
+            breadcrumb = " > ".join(str(part) for part in path)
         else:
-            _sync_dummy_counter(level, context_markdown)
-        return [_dummy_child_title(level) for _ in range(n)]
+            breadcrumb = str(path)
+        title = str(entry.get("title", "") or "").strip() or breadcrumb.split(" > ")[-1]
+        level = entry.get("level")
+        entry_lines.append(f"{idx}. Path: {breadcrumb}")
+        entry_lines.append(f"   Title: {title}")
+        if isinstance(level, int):
+            entry_lines.append(f"   Heading level: {level}")
+    entries_block = "\n".join(entry_lines)
 
-    lines = [line.strip() for line in result.splitlines() if line.strip()]
-    if len(lines) < n:
-        if reset_counter:
-            _reset_level_counter(level)
-        else:
-            _sync_dummy_counter(level, context_markdown)
-        lines.extend(_dummy_child_title(level) for _ in range(len(lines), n))
-    return lines[:n]
+    prompt = (
+        "You are adding crisp factual sentences to existing leaf nodes in a mind map.\n"
+        "For each entry listed below, write exactly one plain, declarative sentence (≤160 characters) that states the key fact for the final node in the path.\n"
+        "Use knowledge grounded in the supplied context or well-established domain facts; never invent colorful language, metaphors, or marketing copy.\n"
+        "Keep wording precise, avoid repeated phrases across entries, and never mention numbering or these instructions.\n"
+        "Respond strictly as JSON: a list of objects with fields \"index\" (matching the entry number) and \"body\" (the sentence string). "
+        "Example: [{\"index\":1,\"body\":\"<sentence>\"}]."
+        f"\n\nEntries:\n{entries_block}"
+        f"{context_block}"
+    )
 
-
-def generate_children_auto(node_title: str, context_markdown: str | None = None) -> list[str]:
     api_key = os.getenv("OPENROUTER_API_KEY")
     active_model = get_active_model()
     uses_network = bool(api_key) and active_model != OFFLINE_MODEL
     if not uses_network:
-        return generate_children(
-            node_title,
-            3,
-            context_markdown=context_markdown,
-            reset_counter=True,
-        )
-
-    context_text = _normalize_context_text(context_markdown)
-    context = f"\n\nContext:\n{context_text}" if context_text else ""
-    prompt = (
-        "Act as a seasoned lecturer distilling the key takeaway for '{title}'. "
-        "Review the parent and its current children, then add anywhere from 0 to 10 new branches—but treat more than three as costly; exceed three only when an extra branch delivers indispensable new insight. "
-        "Skip anything redundant or slogan-like. Each heading must stand alone and encode the concrete answer (e.g., '1992 Market Share Surge', 'Metzeler R&D Partner', 'ISO 9001 Certification'); never pose a question. "
-        "Prefer ultra-short labels (single vivid words or ≤25 characters) and trust the human to branch further for detail. If no meaningful gaps remain, return nothing. "
-        "List each title on its own line with no numbering, bullets, or filler.{context}"
-    ).format(title=node_title, context=context)
+        return [f"A brief note about {entry.get('title', 'this node')}." for entry in entries]
 
     result = _call_openrouter(prompt)
     if not result:
-        return generate_children(
-            node_title,
-            3,
-            context_markdown=context_markdown,
-            reset_counter=True,
-        )
+        return [f"A brief note about {entry.get('title', 'this node')}." for entry in entries]
 
-    lines = [line.strip() for line in result.splitlines() if line.strip()]
-    filtered = [line for line in lines if line.lower() != "none"]
-    if not filtered:
-        return generate_children(node_title, 3, context_markdown=context_markdown)
-    return filtered[:6]
+    try:
+        parsed = json.loads(result)
+    except json.JSONDecodeError:
+        return [f"A brief note about {entry.get('title', 'this node')}." for entry in entries]
 
+    responses: list[str] = ["" for _ in entries]
+    records = parsed if isinstance(parsed, list) else []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        index = record.get("index")
+        if not isinstance(index, int):
+            continue
+        if not 1 <= index <= len(entries):
+            continue
+        body = record.get("body")
+        if not isinstance(body, str):
+            continue
+        cleaned = " ".join(body.split()).strip()
+        if not cleaned:
+            continue
+        if len(cleaned) > 200:
+            cleaned = cleaned[:200].rstrip()
+        responses[index - 1] = cleaned
 
-def generate_paragraph(node_title: str, context_markdown: str | None = None) -> str:
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        return f"A brief paragraph about {node_title}."
-
-    context_text = _normalize_context_text(context_markdown)
-    context = f"\n\nContext:\n{context_text}" if context_text else ""
-    prompt = (
-        "Write one informative sentence for the mind map node titled '{title}'. "
-        "Default to a brief result/event that feels natural in a mind map, but you may use up to 200 characters when a bit more detail adds clear value. "
-        "Do not exceed 200 characters, and avoid headings or lists.{context}"
-    ).format(title=node_title, context=context)
-
-    result = _call_openrouter(prompt)
-    if not result:
-        return f"A brief paragraph about {node_title}."
-
-    paragraph = " ".join(result.strip().split())
-    if len(paragraph) > 200:
-        paragraph = paragraph[:200].rstrip()
-    return paragraph if paragraph else f"A brief paragraph about {node_title}."
+    fallback_template = "A brief note about {title}."
+    for idx, text in enumerate(responses):
+        if text:
+            continue
+        title = str(entries[idx].get("title", "this node"))
+        responses[idx] = fallback_template.format(title=title)
+    return responses

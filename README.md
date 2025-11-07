@@ -7,7 +7,8 @@ m1ndm4p is a Textual-based TUI for iterating on Markdown mind maps with optional
 - **Keyboard-first terminal UI** – zero mouse, no visual clutter, fast navigation.
 - **Markdown storage** – plain text mind maps you can diff, version, or script.
 - **Mind map workflow** – focus on the essentials, branch level by level.
-- **AI assistant when you want it** – compare OpenRouter models, auto-generate concise nodes or body text.
+- **One-shot subtree generation** – enter depth (`2`) or counts (`8,5,3`) after `f` and the AI emits the entire outline (titles + optional text) in one prompt.
+- **Batch leaf text** – press `t` on any branch to annotate all of its leaves in one go, keeping tone consistent and token usage low.
 - **Manual mode always available** – every edit works offline; use AI only when you need a boost.
 
 ![m1ndm4p demo](https://github.com/renn-tv/m1ndm4p/blob/main/m1ndm4p.gif)
@@ -43,7 +44,7 @@ The UI opens in your terminal, loads `mindmap.md` if present, or starts with a �
 | `q` | Quit |
 | `s` | Save to `mindmap.md` |
 | `o` | Load `mindmap.md` |
-| `t` | Generate short body text (AI) |
+| `t` | Generate text for the focused leaf or entire branch (AI) |
 | `e` | Inline edit node title/body line |
 | `tab` | Add manual child + rename |
 | `?` | Auto-generate 0–10 curated child nodes (AI) |
@@ -51,12 +52,12 @@ The UI opens in your terminal, loads `mindmap.md` if present, or starts with a �
 | `+` / `-` | Add/remove one AI suggestion |
 | `w` | Import external context from URL |
 | `i` | Edit external context buffer (Enter saves) |
-| `l` + digit | Show only that many levels (0 = all) |
+| `l` + digit | Limit levels under the focused node (0 = all under that branch) |
 | Arrow keys / `left` `right` | Navigate / expand / collapse |
 | `Esc` | Cancel edits, level prompts, or stop AI runs |
-| `a` | Expand entire tree |
+| `a` | Expand only the focused branch (root = entire tree) |
 | `0` | Clear selected entry |
-| `f` | Launch multi-level generation workflow |
+| `f` | Launch multi-level generation (type `2` or counts like `8,5,3`; `t` toggles text before Enter) |
 | `m` | Choose OpenRouter model |
 
 ## Logs
@@ -68,17 +69,19 @@ Both logs reset on startup.
 
 ## Best practices
 
-1. **Shape the top level manually** first; use `tab` + `e` before involving AI.
-2. **Provide concise context** via `i` or `w` so the model knows what’s already known.
-3. **Keep headings short** (single words or ≤25 characters) even after AI generation.
-4. **Iterate level by level**—prune duplicates, then re-run `?`. Press `Esc` to cancel long AI runs.
-5. **Limit the view** with `l` + digit when presenting or focusing on a subset.
-6. **Save frequently** with `s`; `mindmap.md` is the single source of truth.
+1. **Design the skeleton first.** Sketch the top level by hand (`tab` + `e`), then hand the branch to AI so the outline stays aligned with your intent.
+2. **Use structured full builds.** `f` + counts (e.g., `6,4,2`) gives you a predictable footprint. Rerun `f` on any branch to iterate rapidly.
+3. **Layer context intentionally.** Paste external notes with `i`/`w` before triggering AI so subtree generations remain grounded in the facts you care about.
+4. **Annotate in batches.** Press `t` on any branch to fill every leaf with a single batched request—faster, cheaper, and stylistically consistent.
+5. **Audit as you go.** Collapse/expand views with `l` (per branch) and `a` so you can spot redundant headings or shallow spots before regenerating.
+6. **Commit frequently.** `s` writes `mindmap.md`; `prompt.log` and `connection.log` are rotated on startup, so use them for learning but rely on Git for lasting history.
 
 ## Troubleshooting
 
-- **No API key?** You’ll still get dummy output; set `OPENROUTER_API_KEY` for live completions.
-- **Too many redundant nodes?** Delete overlaps, refine context, and regenerate.
-- **Rendering issues?** Use a Unicode-capable terminal and ensure the virtual environment has `textual` installed.
+- **AI unavailable?** Without `OPENROUTER_API_KEY`, the app falls back to deterministic dummy output; set the key or switch models via `m`.
+- **Structure feels flat?** Rerun `f` with explicit counts (e.g., `8,5`) or toggle text mode (`t`) to force deeper groupings and accompanying summaries.
+- **Text landed on the wrong level?** Remember sentences only appear on leaves—delete or add children, then hit `t` again to refresh only the necessary nodes.
+- **Prompt budget exploding?** Batch leaf generation (`t` on a branch) and leverage full builds instead of per-node requests; logs (`prompt.log`) show exactly what ran.
+- **UI quirks?** Ensure you’re inside a Unicode-capable terminal and that `textual`/`rich` are installed in the active virtual environment.
 
 Launch `python app.py`, keep iterating on `mindmap.md`, and let AI assist without taking control.

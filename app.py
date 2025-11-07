@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from html.parser import HTMLParser
 from pathlib import Path
 import textwrap
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Literal, Optional
 from urllib import request
 from urllib.parse import urlparse
 
@@ -287,6 +287,7 @@ class MindmapApp(App[None]):
         self._stop_after_current_step = False
         self._full_task: Optional[asyncio.Task[None]] = None
         self._level_pending = False
+        self._level_anchor_id: Optional[str] = None
         ai.reset_prompt_log()
         ai.reset_connection_log()
 
@@ -465,34 +466,39 @@ class MindmapApp(App[None]):
         self._context_url = target
         self.show_status(f"Imported web context from {host}.")
 
-    def _apply_generated_children(
-        self,
-        tree_node: Tree.Node[MindmapNode],
-        model_node: MindmapNode,
-        child_titles: list[str],
-    ) -> int:
+    def _resolve_level_anchor(self) -> Tree.Node[MindmapNode]:
         tree = self.require_tree()
-        model_node.children = []
-        for child in list(tree_node.children):
-            child.remove()
-        child_level = self._tree_node_level(tree_node) + 1
-        for index, title in enumerate(child_titles, start=1):
-            clean_title = title.strip() or f"Level {child_level} Node {index}"
-            new_model = MindmapNode(clean_title)
-            model_node.children.append(new_model)
-            new_tree_node = tree_node.add(self._format_node_label(new_model), data=new_model)
-            new_tree_node.expand()
-        tree_node.expand()
-        tree.refresh(layout=True)
-        return child_level
+        if self._level_anchor_id:
+            try:
+                node = tree.get_node_by_id(self._level_anchor_id)
+            except UnknownNodeID:
+                node = None
+            else:
+                if node is not None:
+                    return node
+        return tree.root
 
-    def _apply_level_limit(self, level_limit: int) -> None:
+    def _apply_level_limit(
+        self,
+        level_limit: int,
+        *,
+        anchor: Tree.Node[MindmapNode] | None = None,
+    ) -> None:
         tree = self.require_tree()
-        root = tree.root
+        target = anchor or tree.root
+        current = target
+        while current.parent is not None:
+            current.parent.expand()
+            current = current.parent
+
         if level_limit <= 0:
-            root.expand_all()
+            target.expand_all()
             tree.refresh(layout=True)
-            self.show_status("Showing all levels.")
+            if target is tree.root:
+                self.show_status("Showing all levels.")
+            else:
+                title = target.data.title if isinstance(target.data, MindmapNode) else "selection"
+                self.show_status(f"Showing all levels under {title}.")
             return
 
         def clamp(node: Tree.Node[MindmapNode], depth: int) -> None:
@@ -503,9 +509,13 @@ class MindmapApp(App[None]):
                 for child in node.children:
                     clamp(child, depth + 1)
 
-        clamp(root, 0)
+        clamp(target, 0)
         tree.refresh(layout=True)
-        self.show_status(f"Showing levels ≤ {level_limit}.")
+        if target is tree.root:
+            self.show_status(f"Showing levels ≤ {level_limit}.")
+        else:
+            title = target.data.title if isinstance(target.data, MindmapNode) else "selection"
+            self.show_status(f"Showing levels ≤ {level_limit} under {title}.")
 
     def _start_inline_edit(
         self,
@@ -668,7 +678,8 @@ class MindmapApp(App[None]):
     def _handle_edit_key(self, event: events.Key) -> None:
         if self._edit_state is None:
             return
-        key_name, modifiers = _key_name_and_modifiers(event.key)
+        raw_key = getattr(event, "key", "")
+        key_name, modifiers = _key_name_and_modifiers(raw_key or "")
         shift_held = "shift" in modifiers
         control_held = bool({"ctrl", "control", "cmd", "command", "meta"} & modifiers)
         if key_name == "escape":
@@ -787,6 +798,18 @@ class MindmapApp(App[None]):
             current = current.parent
         return level
 
+    def _node_path(self, tree_node: Tree.Node[MindmapNode]) -> list[str]:
+        path: list[str] = []
+        current: Tree.Node[MindmapNode] | None = tree_node
+        while current is not None:
+            data = current.data
+            if isinstance(data, MindmapNode):
+                path.append(data.title)
+            current = current.parent
+        if not path:
+            return [self.mindmap_root.title]
+        return list(reversed(path))
+
     def _resolve_model_tree_node(
         self, tree_node: Tree.Node[MindmapNode]
     ) -> tuple[Tree.Node[MindmapNode], MindmapNode] | tuple[None, None]:
@@ -798,6 +821,69 @@ class MindmapApp(App[None]):
             if parent_node is not None and isinstance(parent_node.data, MindmapNode):
                 return parent_node, parent_node.data
         return None, None
+
+    def _apply_generated_subtree(
+        self,
+        tree_node: Tree.Node[MindmapNode],
+        model_node: MindmapNode,
+        generated_root: MindmapNode,
+        *,
+        replace_children: bool,
+        update_body: bool,
+        expand_all: bool,
+    ) -> None:
+        if update_body:
+            body_text = (generated_root.body or "").strip()
+            if body_text:
+                model_node.body = body_text
+        if replace_children:
+            model_node.children = generated_root.children
+        self.populate_tree(tree_node, model_node)
+        tree = self.require_tree()
+        if replace_children:
+            if expand_all:
+                tree_node.expand_all()
+            else:
+                tree_node.expand()
+        self._select_tree_node_without_toggle(tree_node)
+        tree.refresh(layout=True)
+
+    async def _request_structured_subtree(
+        self,
+        tree_node: Tree.Node[MindmapNode],
+        *,
+        depth: int,
+        spinner_label: str,
+        mode: Literal["auto", "exact"],
+        exact_children: int | None = None,
+        include_body: bool = False,
+        level_targets: list[int] | None = None,
+    ) -> Optional[MindmapNode]:
+        node_path = self._node_path(tree_node)
+        context = self._contextual_markdown()
+        markdown = await self._call_ai_with_spinner(
+            tree_node,
+            spinner_label,
+            ai.generate_structured_subtree,
+            node_path,
+            depth,
+            context_markdown=context,
+            include_body=include_body,
+            mode=mode,
+            exact_children=exact_children,
+            level_targets=level_targets,
+        )
+        if not isinstance(markdown, str):
+            return None
+        cleaned = markdown.strip()
+        if not cleaned:
+            return None
+        snippet = cleaned if cleaned.endswith("\n") else f"{cleaned}\n"
+        try:
+            return from_markdown(snippet)
+        except ValueError:
+            self.show_status("AI returned malformed outline.")
+            return None
 
     @staticmethod
     def _unique_child_title(raw_title: str | None, parent: MindmapNode) -> str:
@@ -829,28 +915,41 @@ class MindmapApp(App[None]):
         model_node: MindmapNode,
     ) -> None:
         context = self._contextual_markdown()
-        paragraph = await self._call_ai_with_spinner(
+        node_path = self._node_path(tree_node)
+        markdown = await self._call_ai_with_spinner(
             tree_node,
             "generate paragraph",
-            ai.generate_paragraph,
-            model_node.title,
+            ai.generate_structured_subtree,
+            node_path,
+            0,
             context_markdown=context,
+            include_body=True,
+            mode="body",
         )
-        if paragraph is None:
+        if not isinstance(markdown, str):
             return
-        if not isinstance(paragraph, str):
+        cleaned = markdown.strip()
+        if not cleaned:
             self.show_status(f"No text returned for {model_node.title}.")
             return
-        paragraph = paragraph.strip()
-        if not paragraph:
+        snippet = cleaned if cleaned.endswith("\n") else f"{cleaned}\n"
+        try:
+            generated_root = from_markdown(snippet)
+        except ValueError:
+            self.show_status("AI returned malformed text.")
+            return
+        body_text = (generated_root.body or "").strip()
+        if not body_text:
             self.show_status(f"No text returned for {model_node.title}.")
             return
-        model_node.body = paragraph
-        self.populate_tree(tree_node, model_node)
-        tree_node.expand_all()
-        tree = self.require_tree()
-        self._select_tree_node_without_toggle(tree_node)
-        tree.refresh(layout=True)
+        self._apply_generated_subtree(
+            tree_node,
+            model_node,
+            generated_root,
+            replace_children=False,
+            update_body=True,
+            expand_all=False,
+        )
 
     def _gather_leaf_nodes(
         self,
@@ -912,6 +1011,43 @@ class MindmapApp(App[None]):
             return None
         return target_node
 
+    @staticmethod
+    def _parse_full_counts(text: str) -> tuple[int, list[int] | None]:
+        cleaned = text.strip().strip(",")
+        if not cleaned:
+            raise ValueError("Enter a depth (1-5) or comma-separated counts before running full build.")
+        if "," in cleaned:
+            parts = [part.strip() for part in cleaned.split(",") if part.strip()]
+            if not parts:
+                raise ValueError("Provide at least one count when using commas (e.g., 8,5).")
+            if len(parts) > 5:
+                raise ValueError("At most 5 levels are supported.")
+            counts: list[int] = []
+            for part in parts:
+                value = int(part)
+                if value <= 0:
+                    raise ValueError("Counts must be positive integers.")
+                counts.append(value)
+            return len(counts), counts
+        depth = int(cleaned)
+        if not 1 <= depth <= 5:
+            raise ValueError("Depth must be between 1 and 5.")
+        return depth, None
+
+    def _full_prompt_message(self, pending: dict[str, object]) -> str:
+        include_body = bool(pending.get("include_body"))
+        mode = "with text" if include_body else "titles only"
+        counts_input = str(pending.get("counts_input") or "")
+        if counts_input:
+            return (
+                f"Full build ({mode}), counts '{counts_input}'. "
+                "Press Enter to run, T toggles text, Esc cancels."
+            )
+        return (
+            f"Full build pending ({mode}). Type a depth 1-5 or counts like '8,5'. "
+            "Press Enter to run, T toggles text, Esc cancels."
+        )
+
     async def _generate_text_for_leaves(
         self,
         root_tree_node: Tree.Node[MindmapNode],
@@ -926,11 +1062,12 @@ class MindmapApp(App[None]):
             self.show_status("No leaf nodes to annotate.")
             return
         pending_leaves = [
-            (node, leaf_data) for node, leaf_data in leaves if not leaf_data.body
+            (node, leaf_data) for node, leaf_data in leaves if not (leaf_data.body or "").strip()
         ]
         if not pending_leaves:
             self.show_status("All leaf nodes already have text.")
             return
+        context_markdown = self._contextual_markdown()
         with self._prompt_log_session("Generate leaf text"):
             self._full_in_progress = True
             self._stop_after_current_step = False
@@ -941,13 +1078,45 @@ class MindmapApp(App[None]):
             completed = 0
             cancelled = False
             try:
-                for leaf_node, leaf_model in pending_leaves:
+                batch_size = 6
+                for batch_start in range(0, len(pending_leaves), batch_size):
                     if self._stop_after_current_step:
                         cancelled = True
                         break
-                    leaf_node.expand_all()
-                    await self._generate_body_for_node(leaf_node, leaf_model)
-                    completed += 1
+                    batch = pending_leaves[batch_start : batch_start + batch_size]
+                    entries: list[dict[str, object]] = []
+                    for node, model in batch:
+                        entries.append(
+                            {
+                                "path": self._node_path(node),
+                                "title": model.title,
+                                "level": self._tree_node_level(node),
+                            }
+                        )
+                    bodies = await self._call_ai_with_spinner(
+                        root_tree_node,
+                        "generate leaf text",
+                        ai.generate_leaf_bodies,
+                        entries,
+                        context_markdown=context_markdown,
+                    )
+                    if bodies is None:
+                        continue
+                    if not isinstance(bodies, list):
+                        continue
+                    if self._stop_after_current_step:
+                        cancelled = True
+                        break
+                    for (leaf_node, leaf_model), body_text in zip(batch, bodies):
+                        if not isinstance(body_text, str):
+                            continue
+                        cleaned = body_text.strip()
+                        if not cleaned:
+                            continue
+                        leaf_model.body = cleaned
+                        self.populate_tree(leaf_node, leaf_model)
+                        leaf_node.expand_all()
+                        completed += 1
             finally:
                 self._full_in_progress = False
         if cancelled:
@@ -967,10 +1136,19 @@ class MindmapApp(App[None]):
     async def _handle_full_pending_key(self, event: events.Key) -> bool:
         if self._full_pending is None:
             return False
-        key = event.key
-        if key == "escape":
+        key_name, modifiers = _key_name_and_modifiers(event.key)
+        if key_name == "escape":
             self._full_pending = None
             self.show_status("Full build cancelled.")
+            event.stop()
+            return True
+        pending = self._full_pending
+        if key_name == "t":
+            if not isinstance(pending, dict):
+                return False
+            include_body = bool(pending.get("include_body"))
+            pending["include_body"] = not include_body
+            self.show_status(self._full_prompt_message(pending))
             event.stop()
             return True
         if self._full_in_progress:
@@ -978,8 +1156,22 @@ class MindmapApp(App[None]):
             self.show_status("Full build already running.")
             event.stop()
             return True
-        if key.lower() == "t":
-            pending = self._full_pending
+        counts_input = str(pending.get("counts_input") or "")
+        if key_name in {"enter", "return"}:
+            cleaned = counts_input.strip()
+            if not cleaned:
+                self.bell()
+                self.show_status("Enter a depth (1-5) or counts like '8,5' before pressing Enter.")
+                event.stop()
+                return True
+            try:
+                depth, level_targets = self._parse_full_counts(cleaned)
+            except (ValueError, TypeError) as exc:
+                self.bell()
+                message = str(exc) or "Invalid depth/count input."
+                self.show_status(message)
+                event.stop()
+                return True
             self._full_pending = None
             target_node = self._resolve_pending_node(pending)
             if target_node is None:
@@ -989,34 +1181,53 @@ class MindmapApp(App[None]):
                 return True
             event.stop()
             self._start_full_task(
-                self._generate_text_for_leaves(target_node),
-                label="Text generation",
-            )
-            return True
-        if key.isdigit() and key != "0":
-            depth = int(key)
-            if not 1 <= depth <= 5:
-                self.bell()
-                self.show_status("Depth must be between 1 and 5.")
-                event.stop()
-                return True
-            pending = self._full_pending
-            self._full_pending = None
-            target_node = self._resolve_pending_node(pending)
-            if target_node is None:
-                self.bell()
-                self.show_status("Selected node no longer available.")
-                event.stop()
-                return True
-            event.stop()
-            self._start_full_task(
-                self._execute_full_build(target_node, depth),
+                self._execute_full_build(
+                    target_node,
+                    depth,
+                    include_body=bool(pending.get("include_body")),
+                    level_targets=level_targets,
+                ),
                 label="Full build",
             )
             return True
+        if key_name == "backspace":
+            if counts_input:
+                pending["counts_input"] = counts_input[:-1]
+            self.show_status(self._full_prompt_message(pending))
+            event.stop()
+            return True
+        if key_name == "," or (key_name == "comma" and not modifiers):
+            if not counts_input or counts_input.endswith(","):
+                self.bell()
+                self.show_status("Add a number before inserting another comma (e.g., 8,5).")
+                event.stop()
+                return True
+            segments = counts_input.split(",")
+            if len(segments) >= 5:
+                self.bell()
+                self.show_status("At most 5 levels are supported.")
+                event.stop()
+                return True
+            pending["counts_input"] = counts_input + ","
+            self.show_status(self._full_prompt_message(pending))
+            event.stop()
+            return True
+        if key_name.isdigit():
+            pending["counts_input"] = counts_input + key_name
+            self.show_status(self._full_prompt_message(pending))
+            event.stop()
+            return True
+        # allow direct digit bindings (Textual gives uppercase numerals as actual digits)
+        if raw_key.isdigit():
+            pending["counts_input"] = counts_input + raw_key
+            self.show_status(self._full_prompt_message(pending))
+            event.stop()
+            return True
         # consume unexpected keys while pending
         self.bell()
-        self.show_status("Full build: press 1-5, T, or Esc.")
+        self.show_status(
+            "Full build: type a depth (1-5) or comma-separated counts, T toggles text, Enter runs, Esc cancels."
+        )
         event.stop()
         return True
 
@@ -1063,78 +1274,60 @@ class MindmapApp(App[None]):
         self.bell()
         self.show_status(f"{action_label.capitalize()} failed: {exc}")
 
-    async def _full_generate_recursive(
-        self,
-        tree_node: Tree.Node[MindmapNode],
-        model_node: MindmapNode,
-        depth_remaining: int,
-    ) -> None:
-        if depth_remaining <= 0 or self._stop_after_current_step:
-            return
-
-        context = self._contextual_markdown()
-        child_titles = await self._call_ai_with_spinner(
-            tree_node,
-            "full build children",
-            ai.generate_children_auto,
-            model_node.title,
-            context_markdown=context,
-        )
-        if child_titles is None:
-            return
-        if self._stop_after_current_step:
-            return
-        if not child_titles:
-            self.show_status(f"Full build: no children for {model_node.title}.")
-            return
-        if not isinstance(child_titles, list):
-            self.show_status(f"Full build: unexpected response for {model_node.title}.")
-            return
-
-        self._apply_generated_children(tree_node, model_node, list(child_titles))
-        tree_node.expand()
-        self.require_tree().refresh(layout=True)
-
-        for child_tree_node in list(tree_node.children):
-            if self._stop_after_current_step:
-                return
-            child_data = child_tree_node.data
-            if isinstance(child_data, MindmapNode):
-                await self._full_generate_recursive(
-                    child_tree_node,
-                    child_data,
-                    depth_remaining - 1,
-                )
-            else:
-                self._select_tree_node_without_toggle(tree_node)
-
     async def _execute_full_build(
         self,
         tree_node: Tree.Node[MindmapNode],
         depth: int,
+        *,
+        include_body: bool = False,
+        level_targets: list[int] | None = None,
     ) -> None:
         data = tree_node.data
         if not isinstance(data, MindmapNode):
             self.bell()
             self.show_status("Full build requires a node selection.")
             return
+        generated_root: MindmapNode | None = None
         with self._prompt_log_session(f"Full build depth {depth}"):
             self._full_in_progress = True
             self._stop_after_current_step = False
             self._select_tree_node_without_toggle(tree_node)
             self.show_status(f"Full build to depth {depth} in progress…")
             try:
-                await self._full_generate_recursive(tree_node, data, depth)
-                tree_node.expand_all()
-                self.require_tree().refresh(layout=True)
-                self._select_tree_node_without_toggle(tree_node)
+                generated_root = await self._request_structured_subtree(
+                    tree_node,
+                    depth=depth,
+                    spinner_label="full build",
+                    mode="auto",
+                    include_body=include_body,
+                    level_targets=level_targets,
+                )
             finally:
                 self._full_in_progress = False
         if self._stop_after_current_step:
             self._stop_after_current_step = False
             self.show_status("Full build cancelled.")
             return
-        self.show_status(f"Full build complete to depth {depth}.")
+        if generated_root is None:
+            self.show_status("Full build returned no changes.")
+            return
+        if not generated_root.children:
+            self.show_status(f"Full build: no children added for {data.title}.")
+            return
+        self._apply_generated_subtree(
+            tree_node,
+            data,
+            generated_root,
+            replace_children=True,
+            update_body=include_body,
+            expand_all=True,
+        )
+        mode = "with text" if include_body else "titles only"
+        if level_targets:
+            targets = ", ".join(str(count) for count in level_targets)
+            self.show_status(f"Full build complete to depth {depth} ({mode}, targets: {targets}).")
+        else:
+            self.show_status(f"Full build complete to depth {depth} ({mode}).")
 
     async def action_add_child_suggestion(self) -> None:
         selected_tree_node = self.get_selected_tree_node()
@@ -1150,33 +1343,31 @@ class MindmapApp(App[None]):
             return
 
         target_node_id = target_tree_node.id
-        context = self._contextual_markdown()
         with self._prompt_log_session("Add child suggestion"):
-            suggestions = await self._call_ai_with_spinner(
+            generated_root = await self._request_structured_subtree(
                 target_tree_node,
-                "add child suggestion",
-                ai.generate_children,
-                model_node.title,
-                1,
-                context_markdown=context,
+                depth=1,
+                spinner_label="add child suggestion",
+                mode="exact",
+                exact_children=1,
             )
-        if suggestions is None:
+        if generated_root is None:
             return
 
-        if not suggestions:
+        if not generated_root.children:
             self.show_status("No suggestion returned.")
             return
 
-        candidate_title = None
+        suggestion_node = generated_root.children[0]
+        candidate_title = suggestion_node.title.strip()
         existing_titles = {child.title for child in model_node.children}
-        for suggestion in suggestions:
-            suggestion = suggestion.strip()
-            if suggestion and suggestion not in existing_titles:
-                candidate_title = suggestion
-                break
+        if not candidate_title:
+            self.show_status("Suggestion duplicates existing child.")
+            return
 
         new_title = self._unique_child_title(candidate_title, model_node)
-        model_node.children.append(MindmapNode(new_title))
+        suggestion_node.title = new_title
+        model_node.children.append(suggestion_node)
         self.populate_tree(target_tree_node, model_node)
 
         tree = self.require_tree()
@@ -1298,9 +1489,14 @@ class MindmapApp(App[None]):
         self._full_pending = {
             "node_id": target_tree_node.id,
             "node_ref": target_tree_node,
+            "include_body": False,
+            "counts_input": "",
+            "level_targets": None,
         }
         self._select_tree_node_without_toggle(target_tree_node)
-        self.show_status("Full build: press 1-5 for depth, Esc to cancel.")
+        self.show_status(
+            "Full build: type depth 1-5 or counts like '8,5'. T toggles text, Enter to run, Esc to cancel."
+        )
 
     async def action_generate_children(self, count: int) -> None:
         selected_tree_node = self.get_selected_tree_node()
@@ -1311,26 +1507,35 @@ class MindmapApp(App[None]):
         if count <= 0:
             self.show_status("Count must be positive.")
             return
-        model_node = selected_tree_node.data
-        context = self._contextual_markdown()
-        with self._prompt_log_session("Generate children"):
-            child_titles = await self._call_ai_with_spinner(
-                selected_tree_node,
-                "generate child nodes",
-                ai.generate_children,
-                model_node.title,
-                count,
-                context_markdown=context,
-                reset_counter=True,
-            )
-        if child_titles is None:
+        if not isinstance(selected_tree_node.data, MindmapNode):
+            self.bell()
+            self.show_status("Cannot generate children for this entry.")
             return
-        if not child_titles:
+        model_node = selected_tree_node.data
+        with self._prompt_log_session("Generate children"):
+            generated_root = await self._request_structured_subtree(
+                selected_tree_node,
+                depth=1,
+                spinner_label="generate child nodes",
+                mode="exact",
+                exact_children=count,
+            )
+        if generated_root is None:
+            return
+        if not generated_root.children:
             self.show_status("No child titles returned.")
             return
-        child_level = self._apply_generated_children(selected_tree_node, model_node, child_titles)
+        self._apply_generated_subtree(
+            selected_tree_node,
+            model_node,
+            generated_root,
+            replace_children=True,
+            update_body=False,
+            expand_all=False,
+        )
+        child_level = self._tree_node_level(selected_tree_node) + 1
         self.show_status(
-            f"Generated {len(child_titles)} child{'ren' if len(child_titles) != 1 else ''} at level {child_level}."
+            f"Generated {len(generated_root.children)} child{'ren' if len(generated_root.children) != 1 else ''} at level {child_level}."
         )
 
     async def action_auto_generate_children(self) -> None:
@@ -1339,31 +1544,51 @@ class MindmapApp(App[None]):
             self.bell()
             self.show_status("No node selected.")
             return
-        model_node = selected_tree_node.data
-        context = self._contextual_markdown()
-        with self._prompt_log_session("Auto-generate children"):
-            child_titles = await self._call_ai_with_spinner(
-                selected_tree_node,
-                "generate child nodes",
-                ai.generate_children_auto,
-                model_node.title,
-                context_markdown=context,
-            )
-        if child_titles is None:
+        if not isinstance(selected_tree_node.data, MindmapNode):
+            self.bell()
+            self.show_status("Cannot generate children for this entry.")
             return
-        if not child_titles:
+        model_node = selected_tree_node.data
+        with self._prompt_log_session("Auto-generate children"):
+            generated_root = await self._request_structured_subtree(
+                selected_tree_node,
+                depth=1,
+                spinner_label="generate child nodes",
+                mode="auto",
+            )
+        if generated_root is None:
+            return
+        if not generated_root.children:
             self.show_status("No child titles returned.")
             return
-        child_level = self._apply_generated_children(selected_tree_node, model_node, child_titles)
+        self._apply_generated_subtree(
+            selected_tree_node,
+            model_node,
+            generated_root,
+            replace_children=True,
+            update_body=False,
+            expand_all=False,
+        )
+        child_level = self._tree_node_level(selected_tree_node) + 1
         self.show_status(
-            f"Generated {len(child_titles)} AI-selected child{'ren' if len(child_titles) != 1 else ''} at level {child_level}."
+            f"Generated {len(generated_root.children)} AI-selected child{'ren' if len(generated_root.children) != 1 else ''} at level {child_level}."
         )
 
     def action_expand_all(self) -> None:
         tree = self.require_tree()
-        tree.root.expand_all()
+        target = self.get_selected_tree_node() or tree.root
+        current = target
+        while current.parent is not None:
+            current.parent.expand()
+            current = current.parent
+        target.expand_all()
         tree.refresh(layout=True)
-        self.show_status("Expanded entire tree.")
+        if target is tree.root:
+            self.show_status("Expanded entire tree.")
+        else:
+            data = target.data
+            title = data.title if isinstance(data, MindmapNode) else "selection"
+            self.show_status(f"Expanded all under {title}.")
 
     def action_choose_model(self) -> None:
         if not self.model_choices:
@@ -1414,14 +1639,23 @@ class MindmapApp(App[None]):
     def action_level_prompt(self) -> None:
         if self._level_pending:
             self._level_pending = False
+            self._level_anchor_id = None
             self.show_status("Level display unchanged.")
             return
         if self._full_pending is not None:
             self.bell()
             self.show_status("Finish pending requests before adjusting levels.")
             return
+        anchor_node = self.get_selected_tree_node() or self.require_tree().root
+        self._level_anchor_id = anchor_node.id
         self._level_pending = True
-        self.show_status("Levels: press 0 for all, or 1-9 for depth. Esc to cancel.")
+        if anchor_node is self.require_tree().root:
+            scope = "entire tree"
+        else:
+            data = anchor_node.data
+            title = data.title if isinstance(data, MindmapNode) else "selection"
+            scope = f"'{title}' branch"
+        self.show_status(f"Levels for {scope}: press 0 for all, or 1-9 for depth. Esc to cancel.")
 
     def action_import_web_context(self) -> None:
         def apply_url(result: dict[str, str] | None) -> None:
@@ -1480,6 +1714,13 @@ class MindmapApp(App[None]):
             self.show_status("No node selected.")
             return
         model_node = selected_tree_node.data
+        if not isinstance(model_node, MindmapNode):
+            self.bell()
+            self.show_status("Cannot annotate this entry.")
+            return
+        if model_node.children:
+            await self._generate_text_for_leaves(selected_tree_node)
+            return
         with self._prompt_log_session("Generate body text"):
             await self._generate_body_for_node(selected_tree_node, model_node)
 
@@ -1492,13 +1733,16 @@ class MindmapApp(App[None]):
             if self._level_pending:
                 if key_name == "escape":
                     self._level_pending = False
+                    self._level_anchor_id = None
                     self.show_status("Level display unchanged.")
                     event.stop()
                     return
                 if key_name.isdigit():
                     depth = int(key_name)
                     self._level_pending = False
-                    self._apply_level_limit(depth)
+                    anchor_node = self._resolve_level_anchor()
+                    self._apply_level_limit(depth, anchor=anchor_node)
+                    self._level_anchor_id = None
                     event.stop()
                     return
                 # consume other keys while waiting for level input
