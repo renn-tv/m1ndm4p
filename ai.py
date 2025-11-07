@@ -192,6 +192,10 @@ def _post_openrouter(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "X-Title": "m1ndm4p",
+        "X-App-Name": "m1ndm4p",
+        "X-App-URL": "https://github.com/renn-tv/m1ndm4p",
+        "X-App-Icon": "https://dentro.de/ai/images/DENTROID_Logo.png",
+        "Referer": "https://github.com/renn-tv/m1ndm4p",
     }
     body = {
         "model": model,
