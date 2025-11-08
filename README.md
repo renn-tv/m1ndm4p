@@ -1,16 +1,14 @@
 # AI powered Mind Map creation in Terminal.
 
-m1ndm4p is a Textual-based TUI for iterating on Markdown mind maps with optional OpenRouter-powered assistance. You edit nodes inline, call the model for suggestions, and keep full control over the `mindmap.md` file stored in the repo.
+m1ndm4p is a powerful Textual-based TUI for iterating on Markdown mind maps with optional OpenRouter-powered AI assistance.
 
 ## TL;DR
 
-- **Keyboard-first terminal UI** – zero mouse, no visual clutter, fast navigation.
-- **Markdown storage** – plain text mind maps you can diff, version, or script.
-- **Mind map workflow** – focus on the essentials, branch level by level.
-- **One-shot subtree generation** – enter depth (`2`) or counts (`8,5,3`) after `f` and the AI emits the entire outline (titles + optional text) in one prompt.
-- **Batch leaf text** – press `t` on any branch to annotate all of its leaves in one go, keeping tone consistent and token usage low.
-- **Manual mode always available** – every edit works offline; use AI only when you need a boost.
-- **Markmap preview** – hit `p` at any time to export the current tree as an interactive HTML mind map.
+- **AI power** – generate branches, annotate leaves, or add emoji labels with a single key.
+- **Terminal workflow** – edit everything in Textual; the keyboard is all you need.
+- **Markdown source** – the entire mind map lives in `mindmap.md`, easy to diff or script.
+- **Simple RAG** – drop text into the context buffer or fetch a URL; the next AI call digests it.
+- **Markmap export** – press `p` to view the same structure as an interactive browser map.
 
 ![m1ndm4p demo](m1ndm4p.gif)
 
@@ -50,26 +48,27 @@ When the UI opens it automatically expands the root plus two levels (root = leve
 
 | Key | Action |
 | --- | --- |
-| `q` | Quit |
-| `s` | Save to `mindmap.md` |
-| `o` | Load `mindmap.md` |
-| `t` | Generate text for the focused leaf or entire branch (AI) |
-| `e` | Inline edit node title/body line |
-| `tab` | Add manual child + rename |
-| `?` | Auto-generate 0–10 curated child nodes (AI) |
-| `1`–`9` | Generate exactly *n* child nodes (AI) |
+| `a` | Expand fully entire tree (or branch) from focus |
+| `e` | Inline edit title or text line |
+| `tab` | Add manual child |
+| `m` | Choose the active OpenRouter model |
+| `f` | Full multi-level AI map generation (like `f8,4`) |
+| `1`–`9` | New 1-9 AI entries on selected node |
+| `?` | Let AI choose how many child nodes to add |
 | `+` / `-` | Add/remove one AI suggestion |
-| `w` | Import external context from URL |
-| `i` | Edit external context buffer (Enter saves) |
-| `l` + digit | Limit levels under the focused node (0 = all under that branch) |
-| Arrow keys / `left` `right` | Navigate / expand / collapse |
-| `Esc` | Cancel edits, level prompts, or stop AI runs |
-| `a` | Expand only the focused branch (root = entire tree) |
-| `:` | Ask AI for an emoji that prefixes the focused title/body line |
-| `0` | Clear selected entry |
-| `f` | Launch multi-level generation (type `2` or counts like `8,5,3`; `t` toggles text before Enter) |
-| `m` | Choose OpenRouter model |
-| `p` | Preview the tree as an interactive Markmap |
+| `t` | AI text for selected node |
+| `:` | AI powered emoji prefix for selected line |
+| `w` | Enter URL for simple RAG style knowledge add |
+| `i` | Edit the simple RAG style knowledge text |
+| `l` | Set visible level depth (press 2 for two levels) |
+| `o` | Open `mindmap.md` |
+| `s` | Save `mindmap.md` |
+| `0` | Delete selected node or text line |
+| `-` | Remove last node |
+| `Space` | Collapse / Expand |
+| `p` | View current mindmap and nodes state in Markmap |
+| `h` | Help showing key bindings (this screen) |
+| `q` | Quit |
 
 ## Markmap integration
 

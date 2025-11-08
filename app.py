@@ -21,10 +21,10 @@ from urllib.parse import urlparse
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import ScrollableContainer, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Footer, Header, Input, OptionList, Static, Tree, TextArea
+from textual.widgets import Header, Input, OptionList, Static, Tree, TextArea
 from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.widgets._tree import TextType, TreeNode, UnknownNodeID
 from rich.text import Text
@@ -166,6 +166,90 @@ class ModelSelectorScreen(ModalScreen[str | None]):
             self.dismiss(None)
 
 
+class KeyBindingsModal(ModalScreen[None]):
+    """Modal dialog that lists available key bindings."""
+
+    DEFAULT_CSS = """
+    KeyBindingsModal {
+        align: center middle;
+    }
+
+    #kb-panel {
+        width: 70;
+        max-height: 32;
+        border: round $secondary;
+        background: $panel;
+        padding: 1 2;
+    }
+
+    #kb-title {
+        text-style: bold;
+        padding-bottom: 1;
+    }
+
+    #kb-scroll {
+        height: 28;
+    }
+    """
+
+    def __init__(self, rows: list[tuple[str, str]]) -> None:
+        super().__init__()
+        self._rows = rows
+
+    def compose(self) -> ComposeResult:
+        width = max((len(key) for key, _ in self._rows), default=4)
+        lines = [f"{key.ljust(width)}  {desc}" for key, desc in self._rows]
+        content = "\n".join(lines) if lines else "No bindings available."
+        with Vertical(id="kb-panel"):
+            yield Static("Key bindings (Esc to close)", id="kb-title")
+            with ScrollableContainer(id="kb-scroll"):
+                yield Static(content, id="kb-table")
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key in {"escape", "h"}:
+            event.stop()
+            self.dismiss(None)
+
+
+class MindmapFooter(Static):
+    """Compact footer describing the curated shortcuts."""
+
+    DEFAULT_CSS = """
+    MindmapFooter {
+        dock: bottom;
+        height: 1;
+        background: #001a33;
+        color: #f2f2f2;
+        padding: 0 1;
+    }
+    """
+
+    CUSTOM_SEGMENTS = [
+        ("h", "elp"),
+        ("q", "uit"),
+        ("e", "dit"),
+        ("a", "ll"),
+        ("m", "odell"),
+        ("1-9", " AI nodes"),
+        ("t", "ext"),
+        ("w", "eb"),
+        ("i", "nput"),
+        ("p", "rint Markmap"),
+        ("^p", "palette"),
+    ]
+
+    def render(self) -> Text:
+        text = Text(no_wrap=True)
+        first = True
+        for key, label in self.CUSTOM_SEGMENTS:
+            if not first:
+                text.append("  ")
+            text.append(f"{key}", style="bold yellow")
+            text.append(f"{label}", style="white")
+            first = False
+        return text
+
+
 class ContextTextArea(TextArea):
     """Specialised TextArea that posts a submit message on Enter."""
 
@@ -299,6 +383,7 @@ class MindmapApp(App[None]):
         Binding("t", "generate_body", "(text)"),
         Binding("e", "edit_node", "(edit)"),
         Binding("i", "edit_context", "Context"),
+        Binding("h", "show_help", "Key bindings"),
         Binding("l", "level_prompt", "Levels"),
         Binding("w", "import_web_context", "(web ctx)"),
         Binding("tab", "add_manual_child", "(manual +)", show=False, priority=True),
@@ -314,6 +399,30 @@ class MindmapApp(App[None]):
     ] + [
         Binding(str(i), f"generate_children({i})", "(AI nodes)", show=False)
         for i in range(2, 10)
+    ]
+
+    KEY_BINDING_HELP = [
+        ("a", "Expand fully entire tree (or branch) from focus"),
+        ("e", "Inline edit title or text line"),
+        ("tab", "Add manual child"),
+        ("m", "Choose the active OpenRouter model"),
+        ("f", "Full multi-level AI map generation (like `f8,4`)"),
+        ("1-9", "New 1-9 AI entries on selected node"),
+        ("?", "Let AI choose how many child nodes to add"),
+        ("+", "Request one more AI child generation"),
+        ("t", "AI text for selected node"),
+        (":", "AI powered emoji prefix for selected line"),
+        ("w", "Enter URL for simple RAG style knowledge add"),
+        ("i", "Edit the RAG style knowledge text"),
+        ("l", "Set visible level depth (like 2 for two levels)"),
+        ("o", "Open mindmap.md"),
+        ("s", "Save mindmap.md"),
+        ("0", "Delete selected node or text line"),
+        ("-", "Remove last node"),
+        ("Space", "Collapse / Expand"),
+        ("p", "View current mindmap and nodes state in Markmap"),
+        ("h", "Help showing key bindings (this screen)"),
+        ("q", "Quit"),
     ]
 
     def __init__(self, initial_markdown_path: str | Path | None = None) -> None:
@@ -350,7 +459,7 @@ class MindmapApp(App[None]):
         tree.show_root = True
         self._tree_widget = tree
         yield tree
-        yield Footer()
+        yield MindmapFooter()
 
     def on_mount(self) -> None:
         self.rebuild_tree()
@@ -1331,27 +1440,23 @@ class MindmapApp(App[None]):
         return target_node
 
     @staticmethod
-    def _parse_full_counts(text: str) -> tuple[int, list[int] | None]:
+    def _parse_full_counts(text: str) -> tuple[int, list[int]]:
         cleaned = text.strip().strip(",")
         if not cleaned:
-            raise ValueError("Enter a depth (1-5) or comma-separated counts before running full build.")
-        if "," in cleaned:
-            parts = [part.strip() for part in cleaned.split(",") if part.strip()]
-            if not parts:
-                raise ValueError("Provide at least one count when using commas (e.g., 8,5).")
-            if len(parts) > 5:
-                raise ValueError("At most 5 levels are supported.")
-            counts: list[int] = []
-            for part in parts:
+            raise ValueError("Enter counts (e.g., 8 or 8,4) before running full build.")
+        parts = [part.strip() for part in cleaned.split(",") if part.strip()]
+        if not parts:
+            raise ValueError("Provide at least one count (e.g., 8 or 8,5).")
+        counts: list[int] = []
+        for part in parts:
+            try:
                 value = int(part)
-                if value <= 0:
-                    raise ValueError("Counts must be positive integers.")
-                counts.append(value)
-            return len(counts), counts
-        depth = int(cleaned)
-        if not 1 <= depth <= 5:
-            raise ValueError("Depth must be between 1 and 5.")
-        return depth, None
+            except ValueError as exc:  # pragma: no cover - defensive
+                raise ValueError("Counts must be positive integers.") from exc
+            if value <= 0:
+                raise ValueError("Counts must be positive integers.")
+            counts.append(value)
+        return len(counts), counts
 
     def _full_prompt_message(self, pending: dict[str, object]) -> str:
         include_body = bool(pending.get("include_body"))
@@ -1363,7 +1468,7 @@ class MindmapApp(App[None]):
                 "Press Enter to run, T toggles text, Esc cancels."
             )
         return (
-            f"Full build pending ({mode}). Type a depth 1-5 or counts like '8,5'. "
+            f"Full build pending ({mode}). Type counts like '8' or '8,5,3'. "
             "Press Enter to run, T toggles text, Esc cancels."
         )
 
@@ -1481,7 +1586,7 @@ class MindmapApp(App[None]):
             cleaned = counts_input.strip()
             if not cleaned:
                 self.bell()
-                self.show_status("Enter a depth (1-5) or counts like '8,5' before pressing Enter.")
+                self.show_status("Enter counts like '8' or '8,5' before pressing Enter.")
                 event.stop()
                 return True
             try:
@@ -1956,6 +2061,10 @@ class MindmapApp(App[None]):
 
         self.push_screen(ContextEditorScreen(self._external_context), apply_context)
 
+    def action_show_help(self) -> None:
+        rows = self._binding_rows()
+        self.push_screen(KeyBindingsModal(rows))
+
     def action_level_prompt(self) -> None:
         if self._level_pending:
             self._level_pending = False
@@ -1996,6 +2105,26 @@ class MindmapApp(App[None]):
             asyncio.create_task(self._import_context_from_url(url_value))
 
         self.push_screen(URLImportScreen(self._context_url), apply_url)
+
+    def _binding_rows(self) -> list[tuple[str, str]]:
+        rows = list(self.KEY_BINDING_HELP)
+        seen = {key.lower() for key, _ in rows}
+        skip_keys = {"left", "right", "up", "down"}
+        for binding in self.BINDINGS:
+            label = binding.key_display or binding.key
+            description = binding.description
+            if not label or not description:
+                continue
+            key_label = label.strip() or binding.key
+            key_lower = key_label.lower()
+            if key_label.lower() in seen:
+                continue
+            if binding.key.isdigit() and binding.key != "0":
+                continue
+            if key_lower in skip_keys:
+                continue
+            rows.append((key_label, description.strip()))
+        return rows
 
     def action_edit_node(self) -> None:
         if self._edit_state is not None:
