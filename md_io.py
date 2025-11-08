@@ -8,6 +8,22 @@ _HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.*)$")
 _BULLET_PATTERN = re.compile(r"^(\s*)-\s+(.*)$")
 
 
+def _format_body_line(line: str) -> str:
+    stripped = line.strip()
+    if not stripped:
+        return ""
+    if stripped.startswith("* "):
+        return stripped
+    return f"* {stripped}"
+
+
+def _strip_body_line_prefix(line: str) -> str:
+    stripped = line.lstrip()
+    if stripped.startswith("* "):
+        return stripped[2:].lstrip()
+    return line
+
+
 def to_markdown(root: MindmapNode) -> str:
     """Serialize a mind map to Markdown using heading levels."""
     if root is None:
@@ -21,7 +37,11 @@ def to_markdown(root: MindmapNode) -> str:
 
         if node.body:
             lines.append("")
-            lines.append(node.body)
+            body_lines = node.body.splitlines()
+            if not body_lines:
+                body_lines = [node.body]
+            for body_line in body_lines:
+                lines.append(_format_body_line(body_line))
 
         if node.children:
             lines.append("")
@@ -78,7 +98,7 @@ def from_markdown(md: str) -> MindmapNode:
                 continue
             if _HEADING_PATTERN.match(current) or _BULLET_PATTERN.match(current):
                 break
-            body_lines.append(current)
+            body_lines.append(_strip_body_line_prefix(current))
             i += 1
 
         if body_lines:

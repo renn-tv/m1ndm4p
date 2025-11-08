@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>m1ndm4p Markmap preview</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+      :root, html, body {
+        height: 100%;
+      }
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #0f0f0f;
+        color: #f2f2f2;
+      }
+      .markmap {
+        position: relative;
+        width: 100%;
+        height: 100%;
+      }
+      .markmap > svg {
+        width: 100%;
+        height: 100%;
+      }
+      .markmap > svg text {
+        fill: #f2f2f2;
+      }
+      .mm-label {
+        color: #f2f2f2 !important;
+      }
+      .mm-body {
+        font-style: italic;
+      }
+      .mm-root {
+        color: #ffffff !important;
+        font-weight: 600;
+      }
+    </style>
+    <script>
+      // Collapse nodes by inserting <!-- markmap: fold --> under the bullet.
+      window.markmap = { autoLoader: { toolbar: true } };
+      console.log("Markmap preview generated at runtime.");
+    </script>
+  </head>
+  <body>
+    <div class="markmap">
+      <script type="text/template">
+# <span class="mm-label mm-root">Douglas Adams</span>
+
+- <span class="mm-label">Early Life and Education</span>
+  <!-- markmap: fold -->
+
+- <span class="mm-label">Writing Career</span>
+  - <span class="mm-label">Early Struggles</span>
+    - <span class="mm-label">Odd Jobs</span>
+      - <span class="mm-label mm-body">To support himself he worked as a hospital porter, barn builder, and bodyguard.</span>
+    - <span class="mm-label">Rejected Scripts</span>
+      - <span class="mm-label mm-body">Numerous early submissions to radio and television were declined as unfashionable or unwieldy.</span>
+    - <span class="mm-label">Edinburgh Fringe</span>
+      - <span class="mm-label mm-body">A 1976 show at the Edinburgh Fringe briefly revived his prospects without securing lasting stability.</span>
+    - <span class="mm-label">Persistence</span>
+      - <span class="mm-label mm-body">He continued refining material despite setbacks, building ideas reused in later successes.</span>
+  - <span class="mm-label">Monty Python and Collaborations</span>
+    <!-- markmap: fold -->
+  - <span class="mm-label">Doctor Who Contributions</span>
+    <!-- markmap: fold -->
+  - <span class="mm-label">The Hitchhiker’s Guide to the Galaxy</span>
+    <!-- markmap: fold -->
+  - <span class="mm-label">Other Fiction and Non-fiction</span>
+    <!-- markmap: fold -->
+
+- <span class="mm-label">Technology, Media, and Innovation</span>
+  <!-- markmap: fold -->
+
+- <span class="mm-label">Personal Beliefs, Life, and Legacy</span>
+  <!-- markmap: fold -->
+
+- <span class="mm-label">Cultural Impact and Reception</span>
+  <!-- markmap: fold -->
+      </script>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/markmap-autoloader@latest"></script>
+    <script>
+      (async () => {
+        if (!window.markmap || !window.markmap.ready) {
+          return;
+        }
+        await window.markmap.ready;
+        document.querySelectorAll(".markmap > svg").forEach((svg) => {
+          const style = document.createElementNS("http://www.w3.org/2000/svg", "style");
+          style.textContent = `
+            .markmap-fo > .markmap-node-content,
+            .markmap-fo > .markmap-node-content * {
+              color: #f2f2f2 !important;
+              opacity: 1 !important;
+            }
+            text {
+              fill: #f2f2f2 !important;
+              opacity: 1 !important;
+            }
+            .markmap-node {
+              opacity: 1 !important;
+            }
+          `;
+          svg.appendChild(style);
+        });
+      })();
+    </script>
+  </body>
+</html>

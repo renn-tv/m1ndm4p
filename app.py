@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
+import html
 from html.parser import HTMLParser
 from pathlib import Path
+import subprocess
+import sys
 import textwrap
 from typing import Awaitable, Callable, Literal, Optional
+import webbrowser
 from urllib import request
 from urllib.parse import urlparse
 
@@ -261,6 +265,7 @@ class MindmapApp(App[None]):
         Binding("-", "remove_child_suggestion", "(child -)"),
         Binding("f", "full_generate", "(full)"),
         Binding("m", "choose_model", "Model"),
+        Binding("p", "preview_markmap", "Markmap"),
         Binding("1", "generate_children(1)", "(AI nodes)", key_display="1-9"),
         Binding("?", "auto_generate_children", "(AI auto)"),
     ] + [
@@ -278,7 +283,7 @@ class MindmapApp(App[None]):
         self.selected_model = ai.get_active_model()
         if self.selected_model not in self.model_choices:
             self.model_choices.append(self.selected_model)
-            self.model_choices.sort()
+        self._markmap_preview_path: Optional[Path] = None
         ai.set_active_model(self.selected_model)
         self._full_pending: Optional[dict[str, object]] = None
         self._full_in_progress = False
@@ -417,6 +422,165 @@ class MindmapApp(App[None]):
         except Exception:
             return html_text
         return "\n".join(line for line in extractor.get_text().splitlines() if line.strip())
+
+    def _markmap_markdown(self) -> str:
+        tree = self.require_tree()
+        root = tree.root
+        title = self.mindmap_root.title.strip() or "Mind map"
+        escaped_title = self._markmap_escape(title)
+        lines: list[str] = [f'# <span class="mm-label mm-root">{escaped_title}</span>', ""]
+        for index, child in enumerate(root.children):
+            lines.extend(self._markmap_collect_lines(child, level=0))
+            if index != len(root.children) - 1:
+                lines.append("")
+        while lines and not lines[-1].strip():
+            lines.pop()
+        lines.append("")
+        return "\n".join(lines)
+
+    def _body_paragraphs(self, body: str) -> list[str]:
+        paragraphs: list[str] = []
+        buffer: list[str] = []
+        for raw_line in body.splitlines():
+            line = raw_line.strip()
+            if not line:
+                if buffer:
+                    paragraphs.append(" ".join(buffer))
+                    buffer = []
+                continue
+            buffer.append(line)
+        if buffer:
+            paragraphs.append(" ".join(buffer))
+        return paragraphs or ([""] if body.strip() else [])
+
+    @staticmethod
+    def _markmap_escape(text_value: str) -> str:
+        return html.escape(text_value, quote=False)
+
+    def _markmap_collect_lines(self, tree_node: Tree.Node[MindmapNode], level: int) -> list[str]:
+        indent = "  " * level
+        data = tree_node.data
+        lines: list[str] = []
+        if isinstance(data, MindmapNode):
+            label = data.title.strip() or "(untitled)"
+            escaped_label = self._markmap_escape(label)
+            lines.append(f'{indent}- <span class="mm-label">{escaped_label}</span>')
+            is_expanded = getattr(tree_node, "is_expanded", True)
+            if data.body and is_expanded:
+                for paragraph in self._body_paragraphs(data.body):
+                    if paragraph.strip():
+                        escaped_paragraph = self._markmap_escape(paragraph.strip())
+                        lines.append(
+                            f'{indent}  - <span class="mm-label mm-body">{escaped_paragraph}</span>'
+                        )
+            has_children = bool(tree_node.children)
+            if has_children and not is_expanded:
+                lines.append(f"{indent}  <!-- markmap: fold -->")
+            if is_expanded:
+                for child in tree_node.children:
+                    lines.extend(self._markmap_collect_lines(child, level + 1))
+        return lines
+
+    def _markmap_preview_html(self, markdown: str) -> str:
+        safe_markdown = markdown.replace("</script>", "<\\/script>")
+        return f"""<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>m1ndm4p Markmap preview</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+      :root, html, body {{
+        height: 100%;
+      }}
+      body {{
+        margin: 0;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #0f0f0f;
+        color: #f2f2f2;
+      }}
+      .markmap {{
+        position: relative;
+        width: 100%;
+        height: 100%;
+      }}
+      .markmap > svg {{
+        width: 100%;
+        height: 100%;
+      }}
+      .markmap > svg text {{
+        fill: #f2f2f2;
+      }}
+      .mm-label {{
+        color: #f2f2f2 !important;
+      }}
+      .mm-body {{
+        font-style: italic;
+      }}
+      .mm-root {{
+        color: #ffffff !important;
+        font-weight: 600;
+      }}
+    </style>
+    <script>
+      // Collapse nodes by inserting <!-- markmap: fold --> under the bullet.
+      window.markmap = {{ autoLoader: {{ toolbar: true }} }};
+      console.log("Markmap preview generated at runtime.");
+    </script>
+  </head>
+  <body>
+    <div class="markmap">
+      <script type="text/template">
+{safe_markdown.strip()}
+      </script>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/markmap-autoloader@latest"></script>
+    <script>
+      (async () => {{
+        if (!window.markmap || !window.markmap.ready) {{
+          return;
+        }}
+        await window.markmap.ready;
+        document.querySelectorAll(".markmap > svg").forEach((svg) => {{
+          const style = document.createElementNS("http://www.w3.org/2000/svg", "style");
+          style.textContent = `
+            .markmap-fo > .markmap-node-content,
+            .markmap-fo > .markmap-node-content * {{
+              color: #f2f2f2 !important;
+              opacity: 1 !important;
+            }}
+            text {{
+              fill: #f2f2f2 !important;
+              opacity: 1 !important;
+            }}
+            .markmap-node {{
+              opacity: 1 !important;
+            }}
+          `;
+          svg.appendChild(style);
+        }});
+      }})();
+    </script>
+  </body>
+</html>
+"""
+
+    def _write_markmap_preview(self) -> Path:
+        markdown = self._markmap_markdown()
+        html = self._markmap_preview_html(markdown)
+        path = Path("markmap_preview.html")
+        path.write_text(html, encoding="utf-8")
+        return path
+
+    def _open_markmap_preview(self, path: Path) -> None:
+        uri = path.resolve().as_uri()
+        if sys.platform == "darwin":
+            try:
+                subprocess.Popen(["open", "-g", uri])
+                return
+            except Exception:
+                pass
+        webbrowser.open(uri, new=2)
 
     @staticmethod
     def _hostname_from_url(url: str) -> str:
@@ -1136,7 +1300,8 @@ class MindmapApp(App[None]):
     async def _handle_full_pending_key(self, event: events.Key) -> bool:
         if self._full_pending is None:
             return False
-        key_name, modifiers = _key_name_and_modifiers(event.key)
+        raw_key = getattr(event, "key", "")
+        key_name, modifiers = _key_name_and_modifiers(raw_key or "")
         if key_name == "escape":
             self._full_pending = None
             self.show_status("Full build cancelled.")
@@ -1361,7 +1526,7 @@ class MindmapApp(App[None]):
         suggestion_node = generated_root.children[0]
         candidate_title = suggestion_node.title.strip()
         existing_titles = {child.title for child in model_node.children}
-        if not candidate_title:
+        if not candidate_title or candidate_title in existing_titles:
             self.show_status("Suggestion duplicates existing child.")
             return
 
@@ -1589,6 +1754,17 @@ class MindmapApp(App[None]):
             data = target.data
             title = data.title if isinstance(data, MindmapNode) else "selection"
             self.show_status(f"Expanded all under {title}.")
+
+    def action_preview_markmap(self) -> None:
+        try:
+            path = self._write_markmap_preview()
+        except Exception as exc:  # pragma: no cover - defensive
+            self.bell()
+            self.show_status(f"Markmap preview failed: {exc}")
+            return
+        self._markmap_preview_path = path
+        self._open_markmap_preview(path)
+        self.show_status("Opened Markmap preview in a browser tab.")
 
     def action_choose_model(self) -> None:
         if not self.model_choices:
