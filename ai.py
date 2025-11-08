@@ -49,6 +49,7 @@ _current_task_prompt_count = 0
 _next_task_label: Optional[str] = None
 _CONNECTION_LOG_PATH = Path("connection.log")
 _connection_log_lock = threading.Lock()
+_EMOJI_FALLBACKS = ["✨", "💡", "🧠", "🌱", "🚀", "📝", "🎯", "📌"]
 
 
 def _reset_prompt_state_locked() -> None:
@@ -537,3 +538,36 @@ def generate_leaf_bodies(
         title = str(entries[idx].get("title", "this node"))
         responses[idx] = fallback_template.format(title=title)
     return responses
+
+
+def _offline_emoji(text: str) -> str:
+    if not text:
+        return ""
+    score = sum(ord(char) for char in text)
+    return _EMOJI_FALLBACKS[score % len(_EMOJI_FALLBACKS)]
+
+
+def suggest_emoji(text: str, path_hint: str | None = None) -> str:
+    snippet = (text or "").strip()
+    if not snippet:
+        return ""
+    path = (path_hint or "").strip()
+    context_line = f"\nMind map path: {path}" if path else ""
+    prompt = (
+        "Choose a single emoji that matches the theme of this mind map heading or bullet.\n"
+        "Respond with the emoji only. If nothing fits, respond with NONE.\n"
+        f"Entry text: {snippet}{context_line}"
+    )
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    active_model = get_active_model()
+    uses_network = bool(api_key) and active_model != OFFLINE_MODEL
+    if not uses_network:
+        return _offline_emoji(snippet)
+    result = _call_openrouter(prompt)
+    if not result:
+        return ""
+    emoji = result.strip()
+    if not emoji or emoji.upper().startswith("NONE"):
+        return ""
+    token = emoji.split()[0]
+    return token

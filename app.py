@@ -5,6 +5,11 @@ from contextlib import contextmanager
 import html
 from html.parser import HTMLParser
 from pathlib import Path
+import re
+try:
+    import regex as _regex
+except ImportError:  # pragma: no cover
+    _regex = None
 import subprocess
 import sys
 import textwrap
@@ -34,6 +39,43 @@ def _key_name_and_modifiers(key_value: str) -> tuple[str, set[str]]:
     key_name = parts[-1].lower()
     modifiers = {part.lower() for part in parts[:-1] if part}
     return key_name, modifiers
+
+
+if _regex:
+    _EMOJI_PREFIX_RE = _regex.compile(r"^\s*(\X)\s*")
+
+    def _extract_leading_emoji(text: str) -> tuple[str, str]:
+        stripped = text.lstrip()
+        if not stripped:
+            return "", ""
+        remainder = stripped
+        parts: list[str] = []
+        while True:
+            match = _EMOJI_PREFIX_RE.match(remainder)
+            if not match:
+                break
+            grapheme = match.group(1)
+            if not any(0x2600 <= ord(ch) <= 0x1FAFF for ch in grapheme):
+                break
+            parts.append(grapheme)
+            remainder = remainder[match.end() :].lstrip()
+        prefix = "".join(parts)
+        return (remainder if prefix else stripped), prefix
+else:
+    _EMOJI_PREFIX_RE = re.compile(
+        r"^\s*(?:(?::[A-Za-z0-9_+\-]+:)|[\u2600-\u27BF\U0001F000-\U0001FFFF])\s*"
+    )
+
+    def _extract_leading_emoji(text: str) -> tuple[str, str]:
+        stripped = text.lstrip()
+        if not stripped:
+            return "", ""
+        match = _EMOJI_PREFIX_RE.match(stripped)
+        if not match:
+            return stripped, ""
+        emoji = stripped[: match.end()].strip()
+        remainder = stripped[match.end() :].lstrip()
+        return remainder, emoji
 
 
 class MindmapTree(Tree[MindmapNode]):
@@ -264,6 +306,7 @@ class MindmapApp(App[None]):
         Binding("+", "add_child_suggestion", "(child +)"),
         Binding("-", "remove_child_suggestion", "(child -)"),
         Binding("f", "full_generate", "(full)"),
+        Binding(":", "add_emoji", "Emoji"),
         Binding("m", "choose_model", "Model"),
         Binding("p", "preview_markmap", "Markmap"),
         Binding("1", "generate_children(1)", "(AI nodes)", key_display="1-9"),
@@ -365,7 +408,10 @@ class MindmapApp(App[None]):
         return selected.data if selected else None
 
     def _format_node_label(self, node: MindmapNode) -> Text:
-        return Text(node.title)
+        normalized = self._normalized_emoji_spacing(node.title)
+        if normalized != node.title:
+            node.title = normalized
+        return Text(normalized)
 
     @staticmethod
     def _body_lines(body: str) -> list[str]:
@@ -380,6 +426,49 @@ class MindmapApp(App[None]):
         if not lines:
             lines.append("")
         return lines
+
+    @staticmethod
+    def _strip_leading_emoji(text: str) -> tuple[str, str]:
+        return _extract_leading_emoji(text)
+
+    def _with_prefixed_emoji(self, text: str, emoji: str) -> str:
+        base, _ = self._strip_leading_emoji(text)
+        base = base.lstrip()
+        nbsp = "\u00A0"
+        if base:
+            return f"{emoji}{nbsp}{base}"
+        return f"{emoji}{nbsp}"
+
+    def _normalized_emoji_spacing(self, text: str) -> str:
+        remainder, emoji = self._strip_leading_emoji(text)
+        if not emoji:
+            return text
+        nbsp = "\u00A0"
+        remainder = remainder.lstrip()
+        prefix = emoji.rstrip()
+        return f"{prefix}{nbsp}{remainder}" if remainder else f"{prefix}{nbsp}"
+
+    def _capture_expand_state(self) -> dict[str, bool]:
+        tree = self.require_tree()
+        state: dict[str, bool] = {}
+        stack = [tree.root]
+        while stack:
+            node = stack.pop()
+            state[node.id] = node.is_expanded
+            stack.extend(node.children)
+        return state
+
+    def _restore_expand_state(self, state: dict[str, bool]) -> None:
+        tree = self.require_tree()
+        for node_id, expanded in state.items():
+            node = tree.get_node_by_id(node_id)
+            if node is None:
+                continue
+            if expanded:
+                node.expand()
+            else:
+                node.collapse()
+        tree.refresh(layout=True)
 
     def _has_external_context(self) -> bool:
         return bool(self._external_context.strip())
@@ -949,6 +1038,7 @@ class MindmapApp(App[None]):
     def _commit_inline_edit(self) -> None:
         if self._edit_state is None:
             return
+        expand_state = self._capture_expand_state()
         text_value = self._edit_state["text"].strip()
         initial = (self._edit_state.get("initial") or "").strip()
         kind = self._edit_state["kind"]
@@ -956,49 +1046,68 @@ class MindmapApp(App[None]):
         context = self._edit_state["context"]
         tree = self.require_tree()
 
-        if kind == "body_line":
-            parent_node: MindmapNode = context["parent_node"]  # type: ignore[assignment]
-            parent_tree_node_id = context["parent_tree_node_id"]  # type: ignore[assignment]
-            line_index: int = context["line_index"]  # type: ignore[assignment]
-            lines = self._body_lines(parent_node.body or "")
-            while len(lines) <= line_index:
-                lines.append("")
-            new_line_value = text_value
-            lines[line_index] = new_line_value
-            updated_body = "\n".join(lines).strip()
-            parent_node.body = updated_body[:200]
-            parent_tree_node = tree.get_node_by_id(parent_tree_node_id) or tree.root
-            parent_tree_node.expand()
-            tree.refresh(layout=True)
-            # reselect appropriate line if possible
-            new_lines = self._body_lines(parent_node.body or "")
-            new_index = min(line_index, len(new_lines) - 1)
-            selection_offset = len(parent_node.children) + new_index
-            children_nodes = list(parent_tree_node.children)
-            if 0 <= selection_offset < len(children_nodes):
-                target_node = children_nodes[selection_offset]
-                target_node.data = {
-                    "kind": "body_line",
-                    "node": parent_node,
-                    "index": new_index,
-                }
-                tree.select_node(target_node)
+        try:
+            if kind == "body_line":
+                parent_node: MindmapNode = context["parent_node"]  # type: ignore[assignment]
+                line_index: int = context["line_index"]  # type: ignore[assignment]
+                new_line_value = text_value
+                self._update_body_line(parent_node, tree_node, line_index, new_line_value)
+                self.show_status("Text updated.")
             else:
-                tree.select_node(parent_tree_node)
-            tree.focus()
-            self.populate_tree(parent_tree_node, parent_node)
-            self.show_status("Text updated.")
-        else:
-            node: MindmapNode = context["node"]  # type: ignore[assignment]
-            new_title = text_value or initial or node.title
-            node.title = new_title
+                node: MindmapNode = context["node"]  # type: ignore[assignment]
+                new_title = text_value or initial or node.title
+                node.title = new_title
             tree_node.set_label(self._format_node_label(node))
             tree.refresh(layout=True)
-            tree.select_node(tree_node)
-            tree.focus()
+            self._select_tree_node_without_toggle(tree_node)
             self.show_status("Node title updated.")
+        finally:
+            self._edit_state = None
+            self._restore_expand_state(expand_state)
 
-        self._edit_state = None
+    def _update_body_line(
+        self,
+        parent_node: MindmapNode,
+        line_tree_node: Tree.Node[MindmapNode],
+        line_index: int,
+        new_value: str,
+    ) -> None:
+        lines = self._body_lines(parent_node.body or "")
+        while len(lines) <= line_index:
+            lines.append("")
+        lines[line_index] = new_value
+        updated_body = "\n".join(lines).strip()
+        parent_node.body = updated_body[:200]
+        display = f"  {new_value}" if new_value else "  "
+        line_tree_node.set_label(Text(display, style="dim italic"))
+        tree = self.require_tree()
+        tree.refresh(layout=True)
+        self._select_tree_node_without_toggle(line_tree_node)
+        tree.focus()
+
+    async def _request_emoji(
+        self,
+        tree_node: Tree.Node[MindmapNode],
+        text: str,
+        path_label: str,
+    ) -> str:
+        snippet = text.strip()
+        if not snippet:
+            return ""
+        limited = snippet[:200]
+        result = await self._call_ai_with_spinner(
+            tree_node,
+            "Emoji suggestion",
+            ai.suggest_emoji,
+            limited,
+            path_label,
+        )
+        if isinstance(result, str):
+            emoji = result.strip()
+            if emoji.upper() == "NONE":
+                return ""
+            return emoji
+        return ""
 
     def _tree_node_level(self, tree_node: Tree.Node[MindmapNode]) -> int:
         level = 0
@@ -1924,6 +2033,80 @@ class MindmapApp(App[None]):
             kind="title",
             context={"node": data},
         )
+
+    async def action_add_emoji(self) -> None:
+        tree = self.require_tree()
+        selected_tree_node = self.get_selected_tree_node()
+        if selected_tree_node is None or selected_tree_node.data is None:
+            self.bell()
+            self.show_status("No node selected.")
+            return
+        data = selected_tree_node.data
+
+        expand_state = self._capture_expand_state()
+
+        async def apply_to_title(node: MindmapNode, tree_node: Tree.Node[MindmapNode]) -> None:
+            base_text, _ = self._strip_leading_emoji(node.title)
+            candidate = base_text or node.title.strip()
+            if not candidate:
+                self.show_status("Nothing to annotate.")
+                return
+            path = " > ".join(self._node_path(tree_node))
+            emoji = await self._request_emoji(tree_node, candidate, path)
+            if not emoji:
+                self.show_status("Emoji unchanged.")
+                return
+            new_title = self._with_prefixed_emoji(node.title, emoji)
+            if new_title == node.title:
+                self.show_status("Emoji unchanged.")
+                return
+            node.title = new_title
+            tree_node.set_label(self._format_node_label(node))
+            tree.refresh(layout=True)
+            self._select_tree_node_without_toggle(tree_node)
+            tree.focus()
+            self.show_status(f"Emoji set to {emoji}")
+
+        async def apply_to_body_line(
+            body_info: dict[str, object], tree_node: Tree.Node[MindmapNode]
+        ) -> None:
+            parent_node: MindmapNode = body_info["node"]  # type: ignore[assignment]
+            line_index: int = body_info["index"]  # type: ignore[assignment]
+            lines = self._body_lines(parent_node.body or "")
+            if not lines or not (0 <= line_index < len(lines)):
+                self.show_status("Nothing to annotate.")
+                return
+            current_line = lines[line_index]
+            base_text, _ = self._strip_leading_emoji(current_line)
+            candidate = base_text or current_line.strip()
+            if not candidate:
+                self.show_status("Nothing to annotate.")
+                return
+            parent_tree_node = tree_node.parent or tree.root
+            path = " > ".join(self._node_path(parent_tree_node))
+            spinner_node = parent_tree_node if isinstance(parent_tree_node.data, MindmapNode) else tree.root
+            emoji = await self._request_emoji(spinner_node, candidate, f"{path} (text)")
+            if not emoji:
+                self.show_status("Emoji unchanged.")
+                return
+            new_line = self._with_prefixed_emoji(current_line, emoji)
+            if new_line == current_line.strip():
+                self.show_status("Emoji unchanged.")
+                return
+            self._update_body_line(parent_node, tree_node, line_index, new_line)
+            self._restore_expand_state(expand_state)
+            self.show_status(f"Emoji set to {emoji}")
+
+        try:
+            if isinstance(data, MindmapNode):
+                await apply_to_title(data, selected_tree_node)
+            elif isinstance(data, dict) and data.get("kind") == "body_line":
+                await apply_to_body_line(data, selected_tree_node)
+            else:
+                self.bell()
+                self.show_status("Cannot add emoji to this entry.")
+        finally:
+            self._restore_expand_state(expand_state)
 
     async def action_generate_body(self) -> None:
         selected_tree_node = self.get_selected_tree_node()

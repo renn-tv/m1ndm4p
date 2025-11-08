@@ -73,7 +73,7 @@ def from_markdown(md: str) -> MindmapNode:
             continue
 
         level = len(heading_match.group(1))
-        title = heading_match.group(2).strip()
+        title = heading_match.group(2).rstrip()
         node = MindmapNode(title=title)
 
         while stack and stack[-1][0] >= level:
@@ -115,7 +115,7 @@ def from_markdown(md: str) -> MindmapNode:
 
             indent_str = bullet_match.group(1).replace("\t", "    ")
             indent = len(indent_str)
-            bullet_title = bullet_match.group(2).strip()
+            bullet_title = bullet_match.group(2).rstrip()
             bullet_node = MindmapNode(title=bullet_title)
 
             while bullet_stack and indent <= bullet_stack[-1][0]:

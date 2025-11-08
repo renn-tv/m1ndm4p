@@ -65,6 +65,7 @@ When the UI opens it automatically expands the root plus two levels (root = leve
 | Arrow keys / `left` `right` | Navigate / expand / collapse |
 | `Esc` | Cancel edits, level prompts, or stop AI runs |
 | `a` | Expand only the focused branch (root = entire tree) |
+| `:` | Ask AI for an emoji that prefixes the focused title/body line |
 | `0` | Clear selected entry |
 | `f` | Launch multi-level generation (type `2` or counts like `8,5,3`; `t` toggles text before Enter) |
 | `m` | Choose OpenRouter model |
