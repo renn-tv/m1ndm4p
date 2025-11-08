@@ -273,7 +273,7 @@ class MindmapApp(App[None]):
         for i in range(2, 10)
     ]
 
-    def __init__(self) -> None:
+    def __init__(self, initial_markdown_path: str | Path | None = None) -> None:
         super().__init__()
         self.title = "m1ndm4p"
         self._tree_widget: Optional[MindmapTree] = None
@@ -293,6 +293,10 @@ class MindmapApp(App[None]):
         self._full_task: Optional[asyncio.Task[None]] = None
         self._level_pending = False
         self._level_anchor_id: Optional[str] = None
+        self._active_path: Optional[Path] = None
+        self._initial_load_path: Optional[Path] = (
+            Path(initial_markdown_path).expanduser() if initial_markdown_path else None
+        )
         ai.reset_prompt_log()
         ai.reset_connection_log()
 
@@ -306,6 +310,9 @@ class MindmapApp(App[None]):
 
     def on_mount(self) -> None:
         self.rebuild_tree()
+        if self._initial_load_path:
+            self._load_mindmap(self._initial_load_path)
+            return
         self.show_status("Ready")
 
     def rebuild_tree(self) -> None:
@@ -1972,29 +1979,40 @@ class MindmapApp(App[None]):
         self.bell()
         self.show_status("Nothing deleted.")
 
-    def action_save(self) -> None:
-        markdown = to_markdown(self.mindmap_root)
-        Path("mindmap.md").write_text(markdown, encoding="utf-8")
-        self.show_status("Saved to mindmap.md")
+    def _default_mindmap_path(self) -> Path:
+        return self._active_path or Path("mindmap.md")
 
-    def action_open(self) -> None:
-        path = Path("mindmap.md")
-        if not path.exists():
+    def _load_mindmap(self, path: Path) -> bool:
+        target = path.expanduser()
+        if not target.exists():
             self.bell()
-            self.show_status("mindmap.md not found.")
-            return
+            self.show_status(f"{target} not found.")
+            return False
         try:
-            markdown = path.read_text(encoding="utf-8")
+            markdown = target.read_text(encoding="utf-8")
             self.mindmap_root = from_markdown(markdown)
         except Exception as exc:  # pragma: no cover - defensive programming
             self.bell()
-            self.show_status(f"Failed to load mindmap.md: {exc}")
-            return
+            self.show_status(f"Failed to load {target}: {exc}")
+            return False
+        self._active_path = target
         self.rebuild_tree()
         total, text_nodes = self._count_nodes(self.mindmap_root)
+        plural = "s" if text_nodes != 1 else ""
         self.show_status(
-            f"Loaded mindmap.md ({total} nodes, {text_nodes} text line{'s' if text_nodes != 1 else ''})"
+            f"Loaded {target} ({total} nodes, {text_nodes} text line{plural})"
         )
+        return True
+
+    def action_save(self) -> None:
+        path = self._default_mindmap_path().expanduser()
+        markdown = to_markdown(self.mindmap_root)
+        path.write_text(markdown, encoding="utf-8")
+        self._active_path = path
+        self.show_status(f"Saved to {path}")
+
+    def action_open(self) -> None:
+        self._load_mindmap(self._default_mindmap_path())
 
     def action_collapse_cursor(self) -> None:
         node = self.get_selected_tree_node()
@@ -2036,4 +2054,5 @@ class MindmapApp(App[None]):
 
 
 if __name__ == "__main__":
-    MindmapApp().run()
+    initial_path = sys.argv[1] if len(sys.argv) > 1 else None
+    MindmapApp(initial_path).run()

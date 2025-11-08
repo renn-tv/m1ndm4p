@@ -38,6 +38,12 @@ python app.py
 
 The UI opens in your terminal, loads `mindmap.md` if present, or starts with a “Central Idea” root node.
 
+To jump straight into another map, pass the Markdown path as the first argument—the app loads it on startup and keeps saving back to the same file:
+
+```bash
+python app.py path/to/brainstorm.md
+```
+
 ## Key bindings
 
 | Key | Action |
