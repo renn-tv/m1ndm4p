@@ -293,6 +293,7 @@ class MindmapApp(App[None]):
         self._full_task: Optional[asyncio.Task[None]] = None
         self._level_pending = False
         self._level_anchor_id: Optional[str] = None
+        self._current_level_limit: int = 2
         self._active_path: Optional[Path] = None
         self._initial_load_path: Optional[Path] = (
             Path(initial_markdown_path).expanduser() if initial_markdown_path else None
@@ -310,10 +311,11 @@ class MindmapApp(App[None]):
 
     def on_mount(self) -> None:
         self.rebuild_tree()
+        loaded = False
         if self._initial_load_path:
-            self._load_mindmap(self._initial_load_path)
-            return
-        self.show_status("Ready")
+            loaded = self._load_mindmap(self._initial_load_path)
+        if not loaded:
+            self._apply_current_level_limit()
 
     def rebuild_tree(self) -> None:
         ai.reset_dummy_counters()
@@ -323,8 +325,10 @@ class MindmapApp(App[None]):
         root_node.set_label(self._format_node_label(self.mindmap_root))
         root_node.data = self.mindmap_root
         self.populate_tree(root_node, self.mindmap_root)
-        root_node.expand_all()
         tree.select_node(root_node)
+        tree.focus()
+        tree.refresh(layout=True)
+        tree.call_after_refresh(lambda: self._apply_current_level_limit(announce=False))
 
     def require_tree(self) -> MindmapTree:
         if self._tree_widget is None:
@@ -347,17 +351,10 @@ class MindmapApp(App[None]):
                 text_leaf.data = {"kind": "body_line", "node": mindmap_node, "index": index}
 
     def on_tree_node_selected(self, event: Tree.NodeSelected[MindmapNode]) -> None:  # noqa: D401
-        """React to selection changes with a status update."""
-
-        node_data = event.node.data
-        if node_data is None:
+        """Selection changes automatically refresh the level indicator."""
+        if event.node.data is None:
             return
-        level = self._tree_node_level(event.node)
-        if isinstance(node_data, dict) and node_data.get("kind") == "body_line":
-            self.show_status(f"Selected (level {level}): text line")
-        else:
-            title = node_data.title if isinstance(node_data, MindmapNode) else str(node_data)
-            self.show_status(f"Selected (level {level}): {title}")
+        # No status message needed—the level indicator already reflects scope.
 
     def get_selected_tree_node(self) -> Optional[Tree.Node[MindmapNode]]:
         tree = self.require_tree()
@@ -654,6 +651,7 @@ class MindmapApp(App[None]):
         level_limit: int,
         *,
         anchor: Tree.Node[MindmapNode] | None = None,
+        announce: bool = True,
     ) -> None:
         tree = self.require_tree()
         target = anchor or tree.root
@@ -662,31 +660,72 @@ class MindmapApp(App[None]):
             current.parent.expand()
             current = current.parent
 
-        if level_limit <= 0:
-            target.expand_all()
-            tree.refresh(layout=True)
-            if target is tree.root:
-                self.show_status("Showing all levels.")
-            else:
-                title = target.data.title if isinstance(target.data, MindmapNode) else "selection"
-                self.show_status(f"Showing all levels under {title}.")
-            return
+        branch_node = target.data if isinstance(target.data, MindmapNode) else None
+        branch_max_level = (
+            self._calculate_max_level(branch_node) if branch_node is not None else self._calculate_max_level(self.mindmap_root)
+        )
 
-        def clamp(node: Tree.Node[MindmapNode], depth: int) -> None:
-            if depth >= level_limit:
-                node.collapse()
-            else:
+        if level_limit <= 0:
+            display_level = branch_max_level
+            target.expand_all()
+        else:
+            display_level = max(0, min(level_limit, branch_max_level))
+
+            def clamp(node: Tree.Node[MindmapNode], depth: int) -> None:
+                if depth >= display_level:
+                    node.collapse()
+                    return
                 node.expand()
                 for child in node.children:
                     clamp(child, depth + 1)
 
-        clamp(target, 0)
+            clamp(target, 0)
+
         tree.refresh(layout=True)
         if target is tree.root:
-            self.show_status(f"Showing levels ≤ {level_limit}.")
+            self._current_level_limit = level_limit
+        max_for_message = branch_max_level if target is not tree.root else self._calculate_max_level(self.mindmap_root)
+        status = self._format_level_status(
+            display_level,
+            max_for_message,
+            target if target is not tree.root else None,
+        )
+        if announce:
+            self.show_status(level_status=status)
+
+    def _calculate_max_level(self, node: MindmapNode | None) -> int:
+        if node is None or not node.children:
+            return 0
+        return 1 + max(self._calculate_max_level(child) for child in node.children)
+
+    def _format_level_status(
+        self,
+        display_level: int,
+        max_level: int,
+        target: Tree.Node[MindmapNode] | None = None,
+    ) -> str:
+        base = f"Level {display_level} of {max_level}"
+        if target is not None:
+            data = target.data
+            if isinstance(data, MindmapNode):
+                title = data.title
+            else:
+                title = "selection"
+            base = f'{base} under "{title}"'
+        return base
+
+    def _current_level_status(self) -> str:
+        max_level = self._calculate_max_level(self.mindmap_root)
+        limit = self._current_level_limit
+        if limit <= 0:
+            display = max_level
         else:
-            title = target.data.title if isinstance(target.data, MindmapNode) else "selection"
-            self.show_status(f"Showing levels ≤ {level_limit} under {title}.")
+            display = max(0, min(limit, max_level))
+        return self._format_level_status(display, max_level)
+
+    def _apply_current_level_limit(self, *, announce: bool = True) -> None:
+        tree = self.require_tree()
+        self._apply_level_limit(self._current_level_limit, anchor=tree.root, announce=announce)
 
     def _start_inline_edit(
         self,
@@ -1749,18 +1788,7 @@ class MindmapApp(App[None]):
     def action_expand_all(self) -> None:
         tree = self.require_tree()
         target = self.get_selected_tree_node() or tree.root
-        current = target
-        while current.parent is not None:
-            current.parent.expand()
-            current = current.parent
-        target.expand_all()
-        tree.refresh(layout=True)
-        if target is tree.root:
-            self.show_status("Expanded entire tree.")
-        else:
-            data = target.data
-            title = data.title if isinstance(data, MindmapNode) else "selection"
-            self.show_status(f"Expanded all under {title}.")
+        self._apply_level_limit(0, anchor=target)
 
     def action_preview_markmap(self) -> None:
         try:
@@ -1833,12 +1861,19 @@ class MindmapApp(App[None]):
         self._level_anchor_id = anchor_node.id
         self._level_pending = True
         if anchor_node is self.require_tree().root:
-            scope = "entire tree"
+            max_depth = self._calculate_max_level(self.mindmap_root)
         else:
             data = anchor_node.data
-            title = data.title if isinstance(data, MindmapNode) else "selection"
-            scope = f"'{title}' branch"
-        self.show_status(f"Levels for {scope}: press 0 for all, or 1-9 for depth. Esc to cancel.")
+            if isinstance(data, MindmapNode):
+                max_depth = self._calculate_max_level(data)
+            else:
+                max_depth = self._calculate_max_level(self.mindmap_root)
+        if max_depth < 1:
+            self._level_pending = False
+            self._level_anchor_id = None
+            self.show_status("No additional levels.")
+            return
+        self.show_status(f"Press 1-{max_depth} for depth. Esc to cancel.")
 
     def action_import_web_context(self) -> None:
         def apply_url(result: dict[str, str] | None) -> None:
@@ -1921,9 +1956,26 @@ class MindmapApp(App[None]):
                     event.stop()
                     return
                 if key_name.isdigit():
-                    depth = int(key_name)
-                    self._level_pending = False
                     anchor_node = self._resolve_level_anchor()
+                    anchor_data = anchor_node.data if isinstance(anchor_node.data, MindmapNode) else None
+                    max_depth = (
+                        self._calculate_max_level(anchor_data)
+                        if anchor_data
+                        else self._calculate_max_level(self.mindmap_root)
+                    )
+                    if max_depth < 1:
+                        self._level_pending = False
+                        self._level_anchor_id = None
+                        self.show_status("No additional levels to adjust.")
+                        event.stop()
+                        return
+                    depth = int(key_name)
+                    if depth < 1 or depth > max_depth:
+                        self.bell()
+                        self.show_status(f"Depth must be 1-{max_depth}. Esc to cancel.")
+                        event.stop()
+                        return
+                    self._level_pending = False
                     self._apply_level_limit(depth, anchor=anchor_node)
                     self._level_anchor_id = None
                     event.stop()
@@ -1997,11 +2049,7 @@ class MindmapApp(App[None]):
             return False
         self._active_path = target
         self.rebuild_tree()
-        total, text_nodes = self._count_nodes(self.mindmap_root)
-        plural = "s" if text_nodes != 1 else ""
-        self.show_status(
-            f"Loaded {target} ({total} nodes, {text_nodes} text line{plural})"
-        )
+        self.show_status(f"Loaded {target}")
         return True
 
     def action_save(self) -> None:
@@ -2030,9 +2078,14 @@ class MindmapApp(App[None]):
     def action_cursor_down(self) -> None:
         self.require_tree().action_cursor_down()
 
-    def show_status(self, message: str) -> None:
+    def show_status(self, message: str | None = None, *, level_status: str | None = None) -> None:
         context_state = self._context_state_label()
-        self.sub_title = f"{message} | Model: {self.selected_model} | Context: {context_state}"
+        level_text = level_status or self._current_level_status()
+        if message:
+            composed = f"{level_text} · {message}"
+        else:
+            composed = level_text
+        self.sub_title = f"{composed} | Model: {self.selected_model} | Context: {context_state}"
 
     def find_parent(self, root: MindmapNode, target: MindmapNode) -> Optional[MindmapNode]:
         for child in root.children:

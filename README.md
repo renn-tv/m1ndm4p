@@ -44,6 +44,8 @@ To jump straight into another map, pass the Markdown path as the first argumentâ
 python app.py path/to/brainstorm.md
 ```
 
+When the UI opens it automatically expands the root plus two levels (root = level 0) so you can scan the outline immediately. Press `l` and enter a digit to focus on a shallower/deeper slice, or hit `a` to view the entire selected branch.
+
 ## Key bindings
 
 | Key | Action |

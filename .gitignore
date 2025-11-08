@@ -4,6 +4,7 @@ __pycache__/
 .DS_Store
 connection.log
 prompt.log
+markmap_preview.html
 todo.md
 changes.md
 CODING_NOTES.md
