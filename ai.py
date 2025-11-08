@@ -195,7 +195,7 @@ def _post_openrouter(
         "X-App-Name": "m1ndm4p",
         "X-App-URL": "https://github.com/renn-tv/m1ndm4p",
         "X-App-Icon": "https://dentro.de/ai/images/DENTROID_Logo.png",
-        "Referer": "https://github.com/renn-tv/m1ndm4p",
+        "HTTP-Referer": "https://github.com/renn-tv/m1ndm4p",
     }
     body = {
         "model": model,
