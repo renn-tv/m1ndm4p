@@ -474,9 +474,9 @@ class MindmapApp(App[None]):
                             f'{indent}  - <span class="mm-label mm-body">{escaped_paragraph}</span>'
                         )
             has_children = bool(tree_node.children)
-            if has_children and not is_expanded:
-                lines.append(f"{indent}  <!-- markmap: fold -->")
-            if is_expanded:
+            if has_children:
+                if not is_expanded:
+                    lines.append(f"{indent}  <!-- markmap: fold -->")
                 for child in tree_node.children:
                     lines.extend(self._markmap_collect_lines(child, level + 1))
         return lines

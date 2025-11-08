@@ -10,6 +10,7 @@ m1ndm4p is a Textual-based TUI for iterating on Markdown mind maps with optional
 - **One-shot subtree generation** – enter depth (`2`) or counts (`8,5,3`) after `f` and the AI emits the entire outline (titles + optional text) in one prompt.
 - **Batch leaf text** – press `t` on any branch to annotate all of its leaves in one go, keeping tone consistent and token usage low.
 - **Manual mode always available** – every edit works offline; use AI only when you need a boost.
+- **Markmap preview** – hit `p` at any time to export the current tree as an interactive HTML mind map.
 
 ![m1ndm4p demo](m1ndm4p.gif)
 
@@ -59,6 +60,12 @@ The UI opens in your terminal, loads `mindmap.md` if present, or starts with a �
 | `0` | Clear selected entry |
 | `f` | Launch multi-level generation (type `2` or counts like `8,5,3`; `t` toggles text before Enter) |
 | `m` | Choose OpenRouter model |
+| `p` | Preview the tree as an interactive Markmap |
+
+## Markmap integration
+
+Press `p` (or select **Preview Markmap** from the footer hints) to regenerate `markmap_preview.html`. The app writes the current tree into that single HTML file, opens it in your default browser, and reuses the same file for future previews so you can refresh the tab to see updates. The output uses the [markmap](https://markmap.js.org/) library, so you get collapsible branches, zoom, and search without leaving the terminal workflow.
+Branches you collapse inside the TUI are still embedded in the preview—they simply start folded, so you can expand them in the browser when you need the hidden details.
 
 ## Logs
 
