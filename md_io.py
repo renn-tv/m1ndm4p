@@ -1,7 +1,7 @@
 import re
 from typing import List, Optional, Tuple
 
-from models import MindmapNode
+from node_models import MindmapNode
 
 
 _HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.*)$")

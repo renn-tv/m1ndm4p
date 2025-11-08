@@ -25,7 +25,7 @@ from textual.widgets._tree import TextType, TreeNode, UnknownNodeID
 from rich.text import Text
 
 from md_io import from_markdown, to_markdown
-from models import MindmapNode
+from node_models import MindmapNode
 import ai
 
 
