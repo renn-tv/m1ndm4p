@@ -51,6 +51,7 @@ When the UI opens it automatically expands the root plus two levels (root = leve
 | `a` | Expand fully entire tree (or branch) from focus |
 | `e` | Inline edit title or text line |
 | `tab` | Add manual child |
+| `n` | Add manual sibling at same level |
 | `m` | Choose the active OpenRouter model |
 | `f` | Full multi-level AI map generation (like `f8,4`) |
 | `1`–`9` | New 1-9 AI entries on selected node |
@@ -63,8 +64,8 @@ When the UI opens it automatically expands the root plus two levels (root = leve
 | `l` | Set visible level depth (press 2 for two levels) |
 | `o` | Open `mindmap.md` |
 | `s` | Save `mindmap.md` |
-| `0` | Delete selected node or text line |
-| `-` | Remove last node |
+| `0` | Delete everything under selected node (keep it), or clear focused text block |
+| `-` | Delete selected node and its subtree |
 | `Space` | Collapse / Expand |
 | `p` | View current mindmap and nodes state in Markmap |
 | `h` | Help showing key bindings (this screen) |

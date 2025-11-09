@@ -386,8 +386,11 @@ class MindmapApp(App[None]):
         Binding("right", "expand_cursor", "Expand", show=False),
         Binding("up", "cursor_up", "Cursor Up", show=False),
         Binding("down", "cursor_down", "Cursor Down", show=False),
-        Binding("0", "delete_node", "(del)"),
+        Binding("0", "clear_under_node", "(clear under)"),
         Binding("t", "generate_body", "(text)"),
+        # Let Textual / Tree handle Enter; no global override here.
+        # (We intentionally do NOT bind Enter to a custom sibling action.)
+        Binding("n", "add_manual_sibling", "(+ peer)"),
         Binding("e", "edit_node", "(edit)"),
         Binding("i", "edit_context", "Context"),
         Binding("h", "show_help", "Key bindings"),
@@ -396,7 +399,7 @@ class MindmapApp(App[None]):
         Binding("tab", "add_manual_child", "(manual +)", show=False, priority=True),
         Binding("a", "expand_all", "Expand All"),
         Binding("+", "add_child_suggestion", "(child +)"),
-        Binding("-", "remove_child_suggestion", "(child -)"),
+        Binding("-", "delete_node", "(del subtree)"),
         Binding("f", "full_generate", "(full)"),
         Binding(":", "add_emoji", "Emoji"),
         Binding("m", "choose_model", "Model"),
@@ -412,20 +415,22 @@ class MindmapApp(App[None]):
         ("a", "Expand fully entire tree (or branch) from focus"),
         ("e", "Inline edit title or text line"),
         ("tab", "Add manual child"),
+        ("n", "Add manual sibling at same level"),
         ("m", "Choose the active OpenRouter model"),
         ("f", "Full multi-level AI map generation (like `f8,4`)"),
         ("1-9", "New 1-9 AI entries on selected node"),
         ("?", "Let AI choose how many child nodes to add"),
         ("+", "Request one more AI child generation"),
         ("t", "AI text for selected node"),
+        ("Enter", "New manual node at same level below focus"),
         (":", "AI powered emoji prefix for selected line"),
         ("w", "Enter URL for simple RAG style knowledge add"),
         ("i", "Edit the RAG style knowledge text"),
         ("l", "Set visible level depth (like 2 for two levels)"),
         ("o", "Open mindmap.md"),
         ("s", "Save mindmap.md"),
-        ("0", "Delete selected node or text line"),
-        ("-", "Remove last node"),
+        ("0", "Delete everything under selected node (keep it)"),
+        ("-", "Delete selected node and its children"),
         ("Space", "Collapse / Expand"),
         ("p", "View current mindmap and nodes state in Markmap"),
         ("h", "Help showing key bindings (this screen)"),
@@ -503,11 +508,26 @@ class MindmapApp(App[None]):
             child_tree_node = tree_node.add(self._format_node_label(child), data=child)
             self.populate_tree(child_tree_node, child)
         if mindmap_node.body:
-            for index, line in enumerate(self._body_lines(mindmap_node.body)):
-                display = f"  {line}" if line else "  "
-                text_leaf = tree_node.add_leaf(Text(display, style="dim italic"))
+            wrapped_lines = self._body_lines(mindmap_node.body)
+            # Render each visual line as its own leaf so Textual's Tree layout
+            # never overlaps nodes when scrolling. This avoids multi-line labels
+            # conflicting with the mindmap structure.
+            previous_body_leaf: Tree.Node[MindmapNode] | None = None
+            for index, line in enumerate(wrapped_lines):
+                is_spacer = not line.strip()
+                display = "  " if is_spacer else f"  {line}"
+                node_data: dict[str, object] = {
+                    "kind": "body_line",
+                    "node": mindmap_node,
+                    "index": index,
+                }
+                # Use dim italic style for text lines; keep spacer rows minimal.
+                text_leaf = tree_node.add_leaf(
+                    Text(display, style="dim italic"),
+                    data=node_data,
+                )
                 text_leaf.allow_expand = False
-                text_leaf.data = {"kind": "body_line", "node": mindmap_node, "index": index}
+                previous_body_leaf = text_leaf
 
     def on_tree_node_selected(self, event: Tree.NodeSelected[MindmapNode]) -> None:  # noqa: D401
         """Selection changes automatically refresh the level indicator."""
@@ -531,16 +551,48 @@ class MindmapApp(App[None]):
 
     @staticmethod
     def _body_lines(body: str) -> list[str]:
+        """Return visual lines for a body, preserving paragraph breaks as subtle gaps.
+
+        - Consecutive non-empty lines belong to the same paragraph and are wrapped tightly.
+        - Empty lines in the body become a light visual gap (spacer) between paragraphs.
+        """
+        if not (body or "").strip():
+            return []
+
         lines: list[str] = []
-        for block in body.splitlines():
-            block = block.strip()
-            if not block:
-                lines.append("")
-                continue
-            wrapped = textwrap.wrap(block, width=MindmapApp.BODY_WRAP_WIDTH) or [""]
+        paragraph_buffer: list[str] = []
+
+        def _flush_paragraph() -> None:
+            nonlocal lines, paragraph_buffer
+            if not paragraph_buffer:
+                return
+            text = " ".join(paragraph_buffer).strip()
+            if not text:
+                paragraph_buffer = []
+                return
+            wrapped = textwrap.wrap(
+                text,
+                width=MindmapApp.BODY_WRAP_WIDTH,
+            ) or [text]
             lines.extend(wrapped)
-        if not lines:
-            lines.append("")
+            paragraph_buffer = []
+
+        for raw_line in body.splitlines():
+            if raw_line.strip():
+                paragraph_buffer.append(raw_line.strip())
+            else:
+                # End current paragraph and insert a subtle spacer line.
+                _flush_paragraph()
+                # Spacer line: a single space, so it's visually distinct from content
+                # but renders as a small vertical gap instead of collapsing.
+                lines.append(" ")
+
+        _flush_paragraph()
+
+        # Remove trailing pure spacers
+        while lines and not lines[-1].strip():
+            lines.pop()
+
         return lines
 
     @staticmethod
@@ -564,9 +616,10 @@ class MindmapApp(App[None]):
         prefix = emoji.rstrip()
         return f"{prefix}{nbsp}{remainder}" if remainder else f"{prefix}{nbsp}"
 
-    def _capture_expand_state(self) -> dict[str, bool]:
+    def _capture_expand_state(self) -> dict[int, bool]:
+        """Capture expand/collapse state for the entire tree by node id."""
         tree = self.require_tree()
-        state: dict[str, bool] = {}
+        state: dict[int, bool] = {}
         stack = [tree.root]
         while stack:
             node = stack.pop()
@@ -574,11 +627,13 @@ class MindmapApp(App[None]):
             stack.extend(node.children)
         return state
 
-    def _restore_expand_state(self, state: dict[str, bool]) -> None:
+    def _restore_expand_state(self, state: dict[int, bool]) -> None:
+        """Best-effort restore of expand/collapse; ignore IDs that no longer exist."""
         tree = self.require_tree()
         for node_id, expanded in state.items():
-            node = tree.get_node_by_id(node_id)
-            if node is None:
+            try:
+                node = tree.get_node_by_id(node_id)
+            except UnknownNodeID:
                 continue
             if expanded:
                 node.expand()
@@ -1076,8 +1131,8 @@ class MindmapApp(App[None]):
         if anchor is not None and anchor != cursor:
             selection = (min(anchor, cursor), max(anchor, cursor))
         caret = "▌"
-        prefix = "  " if kind == "body_line" else ""
-        base_style = "dim italic" if kind == "body_line" else None
+        prefix = "  " if kind == "body_block" else ""
+        base_style = "dim italic" if kind == "body_block" else None
         highlight_style = f"{base_style} reverse" if base_style else "reverse"
         caret_style = base_style
 
@@ -1686,10 +1741,25 @@ class MindmapApp(App[None]):
         *args: object,
         **kwargs: object,
     ) -> object | None:
+        """Run an AI helper with a lightweight Ora-style spinner attached to the tree."""
         tree = self.require_tree()
-        spinner_frames = ["  .", "  ..", "  ..."]
+
+        # Ora-style braille spinner frames (same sequence used by popular CLIs)
+        spinner_frames = [
+            "⠋",
+            "⠙",
+            "⠹",
+            "⠸",
+            "⠼",
+            "⠴",
+            "⠦",
+            "⠧",
+            "⠇",
+            "⠏",
+        ]
         spinner_index = 0
-        spinner_node = tree_node.add_leaf(Text(spinner_frames[0], style="dim italic"))
+
+        spinner_node = tree_node.add_leaf(Text(spinner_frames[0], style="dim"))
         spinner_node.allow_expand = False
         tree_node.expand()
         tree.refresh(layout=True)
@@ -1697,7 +1767,7 @@ class MindmapApp(App[None]):
         def tick() -> None:
             nonlocal spinner_index
             spinner_index = (spinner_index + 1) % len(spinner_frames)
-            spinner_node.set_label(Text(spinner_frames[spinner_index], style="dim italic"))
+            spinner_node.set_label(Text(spinner_frames[spinner_index], style="dim"))
             tree.refresh(layout=False)
 
         spinner_timer = self.set_interval(0.25, tick)
@@ -1862,6 +1932,91 @@ class MindmapApp(App[None]):
         tree.select_node(new_tree_node)
         tree.focus()
         self._start_inline_edit(new_tree_node, new_node.title, kind="title", context={"node": new_node})
+
+    def action_add_manual_sibling(self) -> None:
+        """Create a new manual node at the same hierarchy directly after the focused node."""
+        if self._edit_state is not None:
+            self.bell()
+            self.show_status("Finish editing before adding a node.")
+            return
+
+        selected_tree_node = self.get_selected_tree_node()
+        if selected_tree_node is None:
+            self.bell()
+            self.show_status("No node selected.")
+            return
+
+        data = selected_tree_node.data
+        tree = self.require_tree()
+
+        # Determine the MindmapNode for which we want a sibling.
+        if isinstance(data, MindmapNode):
+            anchor_node = data
+            parent_tree_node = selected_tree_node.parent
+        elif isinstance(data, dict) and data.get("kind") == "body_line":
+            # For body lines, sibling should be relative to the parent MindmapNode.
+            parent_tree_node = selected_tree_node.parent
+            if parent_tree_node is None or not isinstance(parent_tree_node.data, MindmapNode):
+                self.bell()
+                self.show_status("Cannot add sibling for this entry.")
+                return
+            anchor_node = parent_tree_node.data
+            parent_tree_node = parent_tree_node.parent
+        else:
+            self.bell()
+            self.show_status("Cannot add sibling for this entry.")
+            return
+
+        # Resolve logical parent MindmapNode.
+        if parent_tree_node is None:
+            # Focus is at root level: siblings are children of mindmap_root.
+            parent_model = self.mindmap_root
+            parent_tree_node = tree.root
+        else:
+            parent_data = parent_tree_node.data
+            if not isinstance(parent_data, MindmapNode):
+                self.bell()
+                self.show_status("Cannot resolve parent for sibling.")
+                return
+            parent_model = parent_data
+
+        # Find anchor index within parent's children.
+        try:
+            anchor_index = parent_model.children.index(anchor_node)
+        except ValueError:
+            # If we cannot find the anchor (e.g. body-line case mismatch), append at end.
+            anchor_index = len(parent_model.children) - 1
+
+        # Create and insert new sibling node.
+        base_title = "New idea"
+        new_title = self._unique_child_title(base_title, parent_model)
+        new_node = MindmapNode(new_title)
+        insert_at = max(0, anchor_index + 1)
+        parent_model.children.insert(insert_at, new_node)
+
+        # Preserve expand/collapse as best as possible while refreshing this branch.
+        expand_state = self._capture_expand_state()
+        self.populate_tree(parent_tree_node, parent_model)
+        self._restore_expand_state(expand_state)
+
+        tree.refresh(layout=True)
+
+        # Locate the visual node for the new sibling.
+        new_tree_node = next(
+            (child for child in parent_tree_node.children if child.data is new_node),
+            None,
+        )
+        if new_tree_node is None:
+            self._select_tree_node_without_toggle(parent_tree_node)
+            tree.focus()
+            self.show_status("Added sibling node.")
+            return
+
+        tree.select_node(new_tree_node)
+        tree.focus()
+        self._start_inline_edit(new_tree_node, new_node.title, kind="title", context={"node": new_node})
+        self.show_status("Added sibling node.")
+
 
     def _stop_generation(self) -> bool:
         handled = False
@@ -2157,20 +2312,18 @@ class MindmapApp(App[None]):
             self.show_status("No node selected.")
             return
         data = selected_tree_node.data
-        if isinstance(data, dict) and data.get("kind") == "body_line":
+        if isinstance(data, dict) and data.get("kind") == "body_block":
             parent_node = data["node"]
-            line_index = data["index"]
             lines = self._body_lines(parent_node.body or "")
-            current_value = lines[line_index] if line_index < len(lines) else ""
+            current_value = "\n".join(lines)
             parent_tree_node = selected_tree_node.parent or self.require_tree().root
             self._start_inline_edit(
                 selected_tree_node,
                 current_value,
-                kind="body_line",
+                kind="body_block",
                 context={
                     "parent_node": parent_node,
                     "parent_tree_node_id": parent_tree_node.id,
-                    "line_index": line_index,
                 },
             )
             return
@@ -2278,10 +2431,13 @@ class MindmapApp(App[None]):
 
     async def on_event(self, event: events.Event) -> None:  # noqa: D401
         if isinstance(event, events.Key):
+            # While editing inline text, keep handling keys via our edit handler.
             if self._edit_state is not None:
                 self._handle_edit_key(event)
                 return
-            key_name, _ = _key_name_and_modifiers(event.key)
+
+            key_name, modifiers = _key_name_and_modifiers(event.key)
+
             if self._level_pending:
                 if key_name == "escape":
                     self._level_pending = False
@@ -2325,45 +2481,6 @@ class MindmapApp(App[None]):
                 return
         await super().on_event(event)
 
-    def action_delete_node(self) -> None:
-        selected_tree_node = self.get_selected_tree_node()
-        if selected_tree_node is None or selected_tree_node.data is None:
-            self.bell()
-            self.show_status("No node selected.")
-            return
-        tree = self.require_tree()
-        node_data = selected_tree_node.data
-        if isinstance(node_data, dict) and node_data.get("kind") == "body_line":
-            parent_node = node_data["node"]
-            line_index = node_data["index"]
-            lines = self._body_lines(parent_node.body or "")
-            if 0 <= line_index < len(lines):
-                del lines[line_index]
-                parent_node.body = "\n".join(lines).strip()
-            parent_tree_node = selected_tree_node.parent or tree.root
-            self.populate_tree(parent_tree_node, parent_node)
-            parent_tree_node.expand()
-            tree.refresh(layout=True)
-            children_nodes = list(parent_tree_node.children)
-            text_child_index = len(parent_node.children) + min(line_index, len(lines) - 1)
-            if 0 <= text_child_index < len(children_nodes):
-                tree.select_node(children_nodes[text_child_index])
-            else:
-                tree.select_node(parent_tree_node)
-            self.show_status("Text line deleted.")
-            return
-        if isinstance(node_data, MindmapNode):
-            node_data.body = None
-            node_data.children = []
-            for child in list(selected_tree_node.children):
-                child.remove()
-            selected_tree_node.set_label(self._format_node_label(node_data))
-            tree.refresh(layout=True)
-            tree.select_node(selected_tree_node)
-            self.show_status("Node cleared.")
-            return
-        self.bell()
-        self.show_status("Nothing deleted.")
 
     def _default_mindmap_path(self) -> Path:
         return self._active_path or Path("mindmap.md")
@@ -2421,14 +2538,135 @@ class MindmapApp(App[None]):
             composed = level_text
         self.sub_title = f"{composed} | Model: {self.selected_model} | Context: {context_state}"
 
-    def find_parent(self, root: MindmapNode, target: MindmapNode) -> Optional[MindmapNode]:
+    def _find_parent(self, root: MindmapNode, target: MindmapNode) -> Optional[MindmapNode]:
         for child in root.children:
             if child is target:
                 return root
-            parent = self.find_parent(child, target)
+            parent = self._find_parent(child, target)
             if parent is not None:
                 return parent
         return None
+
+    def action_clear_under_node(self) -> None:
+        """Delete everything under the focused node, but keep that node focused."""
+        selected_tree_node = self.get_selected_tree_node()
+        if selected_tree_node is None or selected_tree_node.data is None:
+            self.bell()
+            self.show_status("No node selected.")
+            return
+
+        tree = self.require_tree()
+        node_data = selected_tree_node.data
+
+        # If clearing under a body_block, just clear that block.
+        if isinstance(node_data, dict) and node_data.get("kind") == "body_block":
+            parent_node: MindmapNode = node_data["node"]  # type: ignore[assignment]
+            parent_tree_node = selected_tree_node.parent or tree.root
+
+            parent_node.body = ""
+            for child in list(selected_tree_node.children):
+                child.remove()
+            selected_tree_node.remove()
+
+            tree.refresh(layout=True)
+            if parent_tree_node is not None:
+                self._select_tree_node_without_toggle(parent_tree_node)
+            tree.focus()
+            self.show_status("Text block cleared.")
+            return
+
+        # If clearing under a real MindmapNode:
+        if isinstance(node_data, MindmapNode):
+            # Clear model children and body, but keep the node itself.
+            node_data.children = []
+            node_data.body = None
+
+            # Remove all visual children from the tree node.
+            for child in list(selected_tree_node.children):
+                child.remove()
+
+            tree.refresh(layout=True)
+            self._select_tree_node_without_toggle(selected_tree_node)
+            tree.focus()
+            self.show_status("Cleared all children and text under selected node.")
+            return
+
+        self.bell()
+        self.show_status("Nothing to clear under selection.")
+
+    def action_delete_node(self) -> None:
+        """Delete the focused node and its subtree; keep focus at a predictable neighbor."""
+        selected_tree_node = self.get_selected_tree_node()
+        if selected_tree_node is None or selected_tree_node.data is None:
+            self.bell()
+            self.show_status("No node selected.")
+            return
+
+        tree = self.require_tree()
+        node_data = selected_tree_node.data
+
+        # If a body block is focused, clear the text but keep focus on its parent node.
+        if isinstance(node_data, dict) and node_data.get("kind") == "body_block":
+            parent_node: MindmapNode = node_data["node"]  # type: ignore[assignment]
+            parent_tree_node = selected_tree_node.parent or tree.root
+
+            parent_node.body = ""
+            for child in list(selected_tree_node.children):
+                child.remove()
+            selected_tree_node.remove()
+
+            tree.refresh(layout=True)
+
+            # Keep focus anchored at the logical parent (no jump to unrelated cell).
+            if parent_tree_node is not None:
+                self._select_tree_node_without_toggle(parent_tree_node)
+            tree.focus()
+            self.show_status("Text block deleted.")
+            return
+
+        # If a real MindmapNode is focused, delete that node and its subtree.
+        if isinstance(node_data, MindmapNode):
+            target_node = node_data
+
+            # Do not delete the root; clear it instead and keep focus there.
+            if target_node is self.mindmap_root:
+                target_node.title = "Central Idea"
+                target_node.body = None
+                target_node.children = []
+                self.populate_tree(tree.root, target_node)
+                tree.refresh(layout=True)
+                self._select_tree_node_without_toggle(tree.root)
+                tree.focus()
+                self.show_status("Root node cleared.")
+                return
+
+            parent = self._find_parent(self.mindmap_root, target_node)
+            if parent is None:
+                self.bell()
+                self.show_status("Parent node not found; nothing deleted.")
+                return
+
+            try:
+                parent.children.remove(target_node)
+            except ValueError:
+                self.bell()
+                self.show_status("Node already removed.")
+                return
+
+            # Let Textual's Tree naturally move the cursor up into the position
+            # where the deleted node was, by simply removing the node.
+            selected_tree_node.remove()
+            tree.refresh(layout=True)
+
+            # Do not manually move selection; this keeps visual focus exactly
+            # where the deleted node used to be (now showing the next item).
+            tree.focus()
+            self.show_status("Node and subtree deleted.")
+            return
+
+        # Any other data type: nothing to do.
+        self.bell()
+        self.show_status("Nothing deleted.")
 
     def _count_nodes(self, node: MindmapNode) -> tuple[int, int]:
         total = 1
