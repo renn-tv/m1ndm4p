@@ -235,7 +235,7 @@ class MindmapFooter(Static):
         ("w", "eb"),
         ("i", "nput"),
         ("p", "rint Markmap"),
-        ("^p", "palette"),
+        ("^p", "alette"),
     ]
 
     def render(self) -> Text:
@@ -244,7 +244,13 @@ class MindmapFooter(Static):
         for key, label in self.CUSTOM_SEGMENTS:
             if not first:
                 text.append("  ")
-            text.append(f"{key}", style="bold yellow")
+            prefix = ""
+            display_key = key
+            if key.startswith("^") and len(key) > 1:
+                prefix = "^"
+                display_key = key[1:]
+            highlight = f"{prefix}{display_key}" if prefix else display_key
+            text.append(highlight, style="bold yellow")
             text.append(f"{label}", style="white")
             first = False
         return text
