@@ -360,6 +360,7 @@ class MindmapApp(App[None]):
     """Textual user interface for the Markdown-backed mind map."""
 
     TITLE = "m1ndm4p"
+    BODY_WRAP_WIDTH = 40
 
     CSS = """
     #mindmap-tree {
@@ -530,7 +531,7 @@ class MindmapApp(App[None]):
             if not block:
                 lines.append("")
                 continue
-            wrapped = textwrap.wrap(block, width=40) or [""]
+            wrapped = textwrap.wrap(block, width=MindmapApp.BODY_WRAP_WIDTH) or [""]
             lines.extend(wrapped)
         if not lines:
             lines.append("")
@@ -659,6 +660,21 @@ class MindmapApp(App[None]):
     def _markmap_escape(text_value: str) -> str:
         return html.escape(text_value, quote=False)
 
+    @staticmethod
+    def _markmap_wrapped_html(text_value: str, width: int | None = None) -> str:
+        stripped = text_value.strip()
+        if not stripped:
+            return ""
+        wrap_width = width or MindmapApp.BODY_WRAP_WIDTH
+        wrapped_lines = textwrap.wrap(
+            stripped,
+            width=wrap_width,
+            break_long_words=False,
+            break_on_hyphens=False,
+        ) or [stripped]
+        escape = MindmapApp._markmap_escape
+        return "<br />".join(escape(line) for line in wrapped_lines)
+
     def _markmap_collect_lines(self, tree_node: Tree.Node[MindmapNode], level: int) -> list[str]:
         indent = "  " * level
         data = tree_node.data
@@ -671,7 +687,7 @@ class MindmapApp(App[None]):
             if data.body and is_expanded:
                 for paragraph in self._body_paragraphs(data.body):
                     if paragraph.strip():
-                        escaped_paragraph = self._markmap_escape(paragraph.strip())
+                        escaped_paragraph = self._markmap_wrapped_html(paragraph.strip())
                         lines.append(
                             f'{indent}  - <span class="mm-label mm-body">{escaped_paragraph}</span>'
                         )
