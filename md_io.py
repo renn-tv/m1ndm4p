@@ -26,81 +26,144 @@ def _strip_body_line_prefix(line: str) -> str:
 
 
 def to_markdown(root: MindmapNode) -> str:
-    """Serialize a mind map to Markdown.
+    """Serialize the current mind map to Markdown.
 
-    Rules:
-    - Heading nodes (kind="heading") are rendered as Markdown headings.
-    - List nodes (kind="list") are rendered as list items (bullets / ordered),
-      even when they have children, so nested lists round-trip.
-    - Body text is emitted as paragraphs under the owning heading or list item.
+    Pure, faithful mapping:
+    - Do NOT mutate or reinterpret the MindmapNode tree.
+    - Use node.kind to decide heading vs list:
+      - kind == "heading" (or None) -> Markdown heading (#..###### by depth)
+      - kind == "list"             -> bullet using list_marker (default "*")
+    - Depth in the tree controls heading level / indent only.
     """
     if root is None:
         raise ValueError("root node must not be None")
 
     lines: List[str] = []
+    first_content_emitted = False
+
+    def append_line(line: str) -> None:
+        nonlocal first_content_emitted
+        if line != "":
+            first_content_emitted = True
+        lines.append(line)
+
+    def emit_h1_spacing() -> None:
+        """Ensure a single blank line before H1 (except at top)."""
+        if not first_content_emitted:
+            return
+        # Strip trailing blanks, then add exactly one.
+        while lines and lines[-1] == "":
+            lines.pop()
+        append_line("")
+
+    def emit_h2_separator() -> None:
+        """Insert Level 2 separator: blank, '---', blank (except at top)."""
+        if not first_content_emitted:
+            return
+        # Normalize trailing blanks.
+        while lines and lines[-1] == "":
+            lines.pop()
+        append_line("")
+        append_line("---")
+        append_line("")
+
+    def emit_single_blank_before_block() -> None:
+        """Ensure exactly one blank line before a new block (L3 or similar)."""
+        if not first_content_emitted:
+            return
+        # Strip trailing blanks, then add one if there is content before.
+        while lines and lines[-1] == "":
+            lines.pop()
+        if lines:
+            append_line("")
 
     def emit_body(body: str, indent: int = 0) -> None:
+        """Emit body text exactly as provided, with optional indent."""
         if not body:
             return
         prefix = " " * indent
-        for idx, line in enumerate(body.splitlines()):
-            # Preserve blank lines inside body
-            if line.strip() == "":
-                lines.append("")
+        for raw in body.splitlines():
+            if raw.strip() == "":
+                append_line("")
             else:
-                lines.append(f"{prefix}{line}")
-        lines.append("")
+                append_line(f"{prefix}{raw}")
 
-    def write_node(node: MindmapNode, depth: int) -> None:
-        """Emit a node and its children, respecting kind for round-tripping.
+    def write_heading(node: MindmapNode, depth: int) -> None:
+        """Emit node as a heading based on its depth."""
+        level = min(depth + 1, 6)
 
-        - kind="heading": render as Markdown heading.
-        - kind="list": render as list item (with original marker when possible),
-          even when the node has children (nested lists).
+        if level == 1:
+            emit_h1_spacing()
+        elif level == 2:
+            emit_h2_separator()
+        elif level == 3:
+            emit_single_blank_before_block()
+
+        heading_line = f"{'#' * level} {node.title}".rstrip()
+        append_line(heading_line)
+
+        if node.body:
+            emit_body(node.body, indent=0)
+
+    def write_list_item(node: MindmapNode, depth: int) -> None:
+        """Emit node as a bullet based on its depth and list_marker.
+
+        Indent rule:
+        - Exactly two spaces before '*' (or ordered marker), regardless of depth.
+        - This keeps output stable and avoids compounding spaces.
         """
-        indent = "  " * depth
+        marker = node.list_marker or "*"
+        indent = "  "
+        title = node.title or ""
 
-        if node.kind == "list":
-            # Render as list item (unordered or ordered) and keep nested children as nested list.
-            marker = node.list_marker or "-"
-            if marker and marker[0].isdigit():
-                # Ordered (e.g. "1." or "2)")
-                prefix = f"{marker} "
-                if node.title.startswith(prefix):
-                    line = node.title.rstrip()
-                else:
-                    line = f"{marker} {node.title}".rstrip()
-            else:
-                # Unordered: don't duplicate marker in title
-                line = f"- {node.title}".rstrip()
-            lines.append(f"{indent}{line}")
-
-            # Body under list item is indented one level
-            if node.body:
-                emit_body(node.body, indent=len(indent) + 2)
-
-            # Children as nested list items (no extra blank line between list item and its nested list)
-            for child in node.children:
-                write_node(child, depth + 1)
-
+        if marker and marker[0].isdigit():
+            # Ordered marker like "1." or "2)"
+            line = f"{marker} {title}".rstrip()
         else:
-            # Default: heading-style node.
-            # Clamp heading level between 1 and 6 (depth 0 = #)
-            level = min(depth + 1, 6)
-            lines.append(f"{'#' * level} {node.title}".rstrip())
-            lines.append("")
+            # Normalize unordered bullets to "*"
+            line = f"* {title}".rstrip()
 
-            if node.body:
-                emit_body(node.body, indent=0)
+        append_line(f"{indent}{line}")
 
-            # Children follow as usual
-            for child in node.children:
-                write_node(child, depth + 1)
+        if node.body:
+            emit_body(node.body, indent=len(indent))
 
-    # Root is treated as depth 0 heading
-    write_node(root, 0)
+    def write_children(parent: MindmapNode, depth: int) -> None:
+        """Emit children of parent with per-level rules:
 
-    # Trim trailing blank lines
+        - Let children = direct MindmapNode children of parent.
+        - Compute:
+          - internal = any child with children
+        - If internal is True:
+            - All children at this level are headings (no bullets here).
+            - For each child:
+                - heading at this depth
+                - recurse into its children at depth + 1
+        - If internal is False (all leaves):
+            - All children at this level are bullets ("deepest level" for this branch).
+        """
+        children = list(parent.children)
+        if not children:
+            return
+
+        has_internal = any(bool(child.children) for child in children)
+
+        if has_internal:
+            # Mixed or all internal: treat all as headings at this level.
+            for child in children:
+                write_heading(child, depth)
+                if child.children:
+                    write_children(child, depth + 1)
+        else:
+            # All leaves: emit as bullets at this level.
+            for child in children:
+                write_list_item(child, depth)
+
+    # Root: always start as heading, then apply per-parent leaf bulletization.
+    write_heading(root, 0)
+    write_children(root, 1)
+
+    # Final cleanup: no trailing blank lines.
     while lines and lines[-1] == "":
         lines.pop()
 
@@ -108,7 +171,12 @@ def to_markdown(root: MindmapNode) -> str:
 
 
 def _match_list_item(line: str):
-    """Return (indent, marker, text) for a list item, or None."""
+    """Return (indent, marker, text) for a list item, or None.
+
+    For ordered items, `marker` is the full prefix (e.g. "1." or "2)"),
+    and `text` is the content WITHOUT that prefix. This prevents
+    duplicating markers on round-trip.
+    """
     bullet_match = _BULLET_PATTERN.match(line)
     if bullet_match:
         indent_str = bullet_match.group(1).replace("\t", "    ")
@@ -123,8 +191,8 @@ def _match_list_item(line: str):
         indent = len(indent_str)
         number = ordered_match.group(2)
         sep = ordered_match.group(3)
-        text = ordered_match.group(4).rstrip()
         marker = f"{number}{sep}"
+        text = ordered_match.group(4).rstrip()
         return indent, marker, text
 
     return None
@@ -189,22 +257,23 @@ def from_markdown(md: str) -> MindmapNode:
 
             indent, marker, text = match
 
-            # For ordered lists, keep the numeric marker visible (e.g. "1)", "2.").
-            # For plain bullets (-, *, +), do NOT show the marker in the title.
-            if marker and marker[0].isdigit():
-                list_node = MindmapNode(
-                    title=f"{marker} {text}",
-                    list_marker=marker,
-                    kind="list",
-                )
+            # Normalize marker style for new / generated maps:
+            # - Always use "*" for bullets in the model.
+            # - Preserve ordered markers (e.g. "1.", "1)") as-is.
+            if marker and not marker[0].isdigit():
+                normalized_marker = "*"
             else:
-                list_node = MindmapNode(
-                    title=text,
-                    list_marker=marker,
-                    kind="list",
-                )
+                normalized_marker = marker
 
-            # Maintain nesting by indent
+            list_node = MindmapNode(
+                title=text,
+                list_marker=normalized_marker,
+                kind="list",
+            )
+
+            # Maintain nesting by indent:
+            # - Indent in Markdown is spaces; treat each 4 spaces (or a tab) as one nesting level.
+            # - This results in visual indentation via "  " per depth on output.
             while list_stack and indent <= list_stack[-1][0]:
                 list_stack.pop()
 

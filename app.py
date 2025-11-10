@@ -365,6 +365,123 @@ class URLImportScreen(ModalScreen[dict[str, str] | None]):
 class MindmapApp(App[None]):
     """Textual user interface for the Markdown-backed mind map."""
 
+    # ------------------------------
+    # Normalization helpers
+    # ------------------------------
+
+    def _normalize_subtree(self, anchor: MindmapNode | None) -> None:
+        """Normalize a subtree (anchor and its descendants) to enforce hierarchy invariants."""
+        if anchor is None:
+            return
+
+        def normalize_node(node: MindmapNode) -> None:
+            # Bottom-up: normalize children first.
+            for child in list(node.children):
+                normalize_node(child)
+
+            children = node.children
+
+            # Snapshot runs of original list siblings BEFORE any promotions.
+            list_runs: list[tuple[int, int]] = []
+            i = 0
+            while i < len(children):
+                if children[i].kind != "list":
+                    i += 1
+                    continue
+                start = i
+                j = i + 1
+                while j < len(children) and children[j].kind == "list":
+                    j += 1
+                list_runs.append((start, j))
+                i = j
+
+            # Rule 1: list-with-children → heading (local).
+            for child in children:
+                if child.kind == "list" and child.children:
+                    child.kind = "heading"
+                    child.list_marker = None
+
+            # Rule 2: group promotion on recorded list runs.
+            # If any node in a recorded run now has children, promote the whole run.
+            for start, end in list_runs:
+                any_has_children = any(
+                    (children[k].children is not None and len(children[k].children) > 0)
+                    for k in range(start, end)
+                )
+                if any_has_children:
+                    for k in range(start, end):
+                        c = children[k]
+                        c.kind = "heading"
+                        c.list_marker = None
+
+            # NOTE:
+            # Do NOT enforce "lowest level is a list" in the live TUI model.
+            # The terminal mindmap view already renders correctly without rewriting
+            # leaf headings into list items. Stability for export will be handled
+            # at save-time in md_io.to_markdown.
+            # Also, avoid forcing list → heading here beyond list-with-children logic,
+            # to prevent divergence between visual tree and saved markdown.
+
+        normalize_node(anchor)
+
+    def _normalize_mindmap_tree(self) -> None:
+        """Normalize self.mindmap_root to enforce hierarchy invariants:
+
+        - No nested lists: list nodes are leaves.
+        - Lowest level on each branch is a list.
+        - For any consecutive run of list siblings:
+          - If any item in the run has children, promote the entire run to headings.
+        """
+        if not isinstance(self.mindmap_root, MindmapNode):
+            return
+
+        def normalize_node(node: MindmapNode) -> None:
+            # Bottom-up: normalize children first.
+            for child in list(node.children):
+                normalize_node(child)
+
+            children = node.children
+
+            # Snapshot runs of original list siblings BEFORE any promotions.
+            list_runs: list[tuple[int, int]] = []
+            i = 0
+            while i < len(children):
+                if children[i].kind != "list":
+                    i += 1
+                    continue
+                start = i
+                j = i + 1
+                while j < len(children) and children[j].kind == "list":
+                    j += 1
+                list_runs.append((start, j))
+                i = j
+
+            # Rule 1: list-with-children → heading (local).
+            for child in children:
+                if child.kind == "list" and child.children:
+                    child.kind = "heading"
+                    child.list_marker = None
+
+            # Rule 2: group promotion on recorded list runs.
+            # If any node in a recorded run now has children, promote the whole run.
+            for start, end in list_runs:
+                any_has_children = any(
+                    (children[k].children is not None and len(children[k].children) > 0)
+                    for k in range(start, end)
+                )
+                if any_has_children:
+                    for k in range(start, end):
+                        c = children[k]
+                        c.kind = "heading"
+                        c.list_marker = None
+
+            # NOTE:
+            # As with _normalize_subtree, we do NOT enforce "lowest level is a list"
+            # globally while editing. That constraint (if desired) is applied only
+            # during Markdown serialization so the TUI model remains stable.
+
+        normalize_node(self.mindmap_root)
+
     TITLE = "m1ndm4p"
     BODY_WRAP_WIDTH = 40
 
@@ -474,6 +591,9 @@ class MindmapApp(App[None]):
         yield MindmapFooter()
 
     def on_mount(self) -> None:
+        # Normalize initial tree (in case a preexisting mindmap is loaded),
+        # then build the UI.
+        self._normalize_mindmap_tree()
         self.rebuild_tree()
         loaded = False
         if self._initial_load_path:
@@ -544,10 +664,35 @@ class MindmapApp(App[None]):
         return selected.data if selected else None
 
     def _format_node_label(self, node: MindmapNode) -> Text:
-        normalized = self._normalized_emoji_spacing(node.title)
+        """Format how a MindmapNode appears in the tree.
+
+        - Headings: show title (with normalized emoji spacing).
+        - List items (leaf-level bullets):
+          - Show just the logical title (no leading "*" marker).
+          - Ordered markers (e.g. "1.", "2)") may be shown to preserve meaning.
+        """
+        title = node.title or ""
+
+        # Normalize emoji spacing on the logical title only.
+        normalized = self._normalized_emoji_spacing(title)
         if normalized != node.title:
             node.title = normalized
-        return Text(normalized)
+        display = normalized
+
+        if node.kind == "list" and node.list_marker:
+            marker = node.list_marker
+
+            # For unordered bullets ("*"), DO NOT show the "*" in the mindmap label.
+            if not marker[0].isdigit():
+                # Keep display as-is (just the title).
+                return Text(display)
+
+            # For ordered list items, show the marker to retain numbering semantics.
+            prefix = f"{marker} "
+            if not display.startswith(prefix):
+                display = f"{marker} {display}" if display else marker
+
+        return Text(display)
 
     @staticmethod
     def _body_lines(body: str) -> list[str]:
@@ -1343,6 +1488,9 @@ class MindmapApp(App[None]):
                 model_node.body = body_text
         if replace_children:
             model_node.children = generated_root.children
+
+        # Normalize starting from the parent of the edited node (one level up).
+        self._normalize_from_node_parent(model_node)
         self.populate_tree(tree_node, model_node)
         tree = self.require_tree()
         if replace_children:
@@ -1885,6 +2033,8 @@ class MindmapApp(App[None]):
         new_title = self._unique_child_title(candidate_title, model_node)
         suggestion_node.title = new_title
         model_node.children.append(suggestion_node)
+
+        self._normalize_from_node_parent(model_node)
         self.populate_tree(target_tree_node, model_node)
 
         tree = self.require_tree()
@@ -1915,6 +2065,8 @@ class MindmapApp(App[None]):
         new_title = self._unique_child_title("New idea", model_node)
         new_node = MindmapNode(new_title)
         model_node.children.append(new_node)
+
+        self._normalize_from_node_parent(new_node)
         self.populate_tree(target_tree_node, model_node)
 
         tree = self.require_tree()
@@ -1994,7 +2146,8 @@ class MindmapApp(App[None]):
         insert_at = max(0, anchor_index + 1)
         parent_model.children.insert(insert_at, new_node)
 
-        # Preserve expand/collapse as best as possible while refreshing this branch.
+        # Normalize from the parent (one level up) then preserve expand/collapse.
+        self._normalize_from_node_parent(new_node)
         expand_state = self._capture_expand_state()
         self.populate_tree(parent_tree_node, parent_model)
         self._restore_expand_state(expand_state)
@@ -2054,6 +2207,8 @@ class MindmapApp(App[None]):
         tree = self.require_tree()
         parent_node_id = target_tree_node.id
         removed_child = model_node.children.pop()
+
+        self._normalize_from_node_parent(model_node)
         self.populate_tree(target_tree_node, model_node)
 
         refreshed_parent = tree.get_node_by_id(parent_node_id) or tree.root
@@ -2547,6 +2702,21 @@ class MindmapApp(App[None]):
                 return parent
         return None
 
+    def _normalize_from_node_parent(self, node: MindmapNode | None) -> None:
+        """Normalize starting one level above the given node.
+
+        If the node has a parent, normalize that parent's subtree.
+        Otherwise, normalize the whole tree.
+        """
+        if node is None:
+            self._normalize_mindmap_tree()
+            return
+        parent = self._find_parent(self.mindmap_root, node)
+        if parent is None:
+            self._normalize_mindmap_tree()
+        else:
+            self._normalize_subtree(parent)
+
     def action_clear_under_node(self) -> None:
         """Delete everything under the focused node, but keep that node focused."""
         selected_tree_node = self.get_selected_tree_node()
@@ -2580,6 +2750,8 @@ class MindmapApp(App[None]):
             # Clear model children and body, but keep the node itself.
             node_data.children = []
             node_data.body = None
+
+            self._normalize_from_node_parent(node_data)
 
             # Remove all visual children from the tree node.
             for child in list(selected_tree_node.children):
@@ -2652,6 +2824,8 @@ class MindmapApp(App[None]):
                 self.bell()
                 self.show_status("Node already removed.")
                 return
+
+            self._normalize_from_node_parent(parent)
 
             # Let Textual's Tree naturally move the cursor up into the position
             # where the deleted node was, by simply removing the node.

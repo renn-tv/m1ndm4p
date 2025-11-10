@@ -1,103 +1,146 @@
-# AI powered Mind Map creation in Terminal.
+# m1ndm4p
 
-m1ndm4p is a powerful Textual-based TUI for iterating on Markdown mind maps with optional OpenRouter-powered AI assistance.
+AI Powered Mind Map Creation in Terminal.
 
-## TL;DR
+![m1ndm4p demo](./m1ndm4p.gif)
 
-- **AI power** – generate branches, annotate leaves, or add emoji labels with a single key.
-- **Terminal workflow** – edit everything in Textual; the keyboard is all you need.
-- **Markdown source** – the entire mind map lives in `mindmap.md`, easy to diff or script.
-- **Simple RAG** – drop text into the context buffer or fetch a URL; the next AI call digests it.
-- **Markmap export** – press `p` to view the same structure as an interactive browser map.
+m1ndm4p turns any structured Markdown file into a live, keyboard-driven mind map – and back again.  
+You can mix fast manual editing with AI-assisted expansion, plug in simple RAG-style context, and export an interactive Markmap for presentation.
 
-![m1ndm4p demo](m1ndm4p.gif)
+## Key Features
 
-## Prerequisites
+- AI-assisted outlining
+  - Generate children, subtrees, body text, emojis, and suggestions via OpenRouter.
+  - Deterministic offline mode available for zero-network environments.
+- Markdown-native
+  - Load existing structured Markdown (headings + lists) into a Mindmap tree.
+  - Save back to a strict, canonical Markdown format for stable round-trips and diffs.
+- Terminal UI (Python + Textual)
+  - Compact, focused interface built for flow and keyboard use.
+  - Inline body text rendering; minimal chrome.
+- Strong keyboard workflow
+  - Tab / n for children & siblings, e to edit, - / 0 to delete, a to expand, l for depth.
+  - h shows an in-app keybinding cheat sheet; footer surfaces key shortcuts.
+- Interactive Markmap export
+  - p generates Markmap HTML from the current map and opens it in your browser.
+  - Uses layout and styling tuned to match the TUI.
+- Simple RAG-style context
+  - i to edit a lightweight context block.
+  - w to fetch and strip text from a URL.
+  - Context influences AI generations without complex setup.
+- OpenRouter integration
+  - m opens a model picker.
+  - Uses OpenRouter’s /chat/completions API with curated defaults.
+  - Just set `OPENROUTER_API_KEY` and choose a model.
 
-- Python 3.11+
-- `pip`
-- *(Optional for AI)* `OPENROUTER_API_KEY`; without it the app falls back to deterministic offline output.
+## Canonical Markdown Format
 
-## Installation
+m1ndm4p enforces a predictable structure on save:
+
+- The in-app MindmapNode tree is the single source of truth.
+- Export rule per parent level:
+  - If any child at that level has children:
+    - All siblings at that level are written as headings (`#`…`######`).
+  - If all children at that level are leaves:
+    - All siblings at that level are written as bullets with exactly two spaces:
+      - `  * Title`
+      - or `  1. Title` etc. for ordered lists.
+- This avoids mixed “heading + peer bullet” artifacts and normalizes imported Markdown into a clean, stable format.
+
+Load structured Markdown → explore & extend in the TUI → save back as canonical Markdown.
+
+## Quick Start
+
+### 1. Install
+
+Requirements:
+
+- Python 3.10+
+- Recommended dependencies:
+  - `textual`
+  - `rich`
+
+Install:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install textual rich
 ```
 
-Clone/copy this repo into a writable directory. The app creates or updates `mindmap.md`, `prompt.log`, and `connection.log` in-place.
+For AI features (optional):
 
-## Running
+- Set `OPENROUTER_API_KEY` in your environment.
+- Optionally set `OPENROUTER_MODEL` (or choose via the in-app model picker).
+
+### 2. Run
+
+From the repo:
 
 ```bash
+# Start with an empty map
 python app.py
+
+# Or load an existing Markdown mind map
+python app.py Mindmaps/your_map.md
 ```
 
-The UI opens in your terminal, loads `mindmap.md` if present, or starts with a “Central Idea” root node.
+By default, save writes to `mindmap.md` in the repo root (or back to the opened file).
 
-To jump straight into another map, pass the Markdown path as the first argument—the app loads it on startup and keeps saving back to the same file:
+## Core Keyboard Shortcuts
 
-```bash
-python app.py path/to/brainstorm.md
-```
+- Navigation:
+  - Arrow keys: move selection
+  - Space: expand / collapse
+  - a: expand all from current node
+  - l: set visible depth (level limit)
+- Editing:
+  - e: edit title / text
+  - tab: add child node
+  - n: add sibling node
+  - -: delete node + subtree
+  - 0: clear children/body under current node (keep node)
+- AI:
+  - 1–9: generate that many child nodes
+  - ?: auto-select how many child nodes to add
+  - +: add one more AI suggestion child under current node
+  - f: full multi-level AI build (guided counts)
+  - t: generate body text
+  - : (colon): suggest an emoji prefix
+- Context & Web:
+  - i: edit simple text context (RAG-style)
+  - w: fetch and strip text from a URL into context
+- Preview & Models:
+  - p: open Markmap HTML preview in browser
+  - m: choose OpenRouter model
+- Meta:
+  - s: save current mind map
+  - o: open `mindmap.md`
+  - h: help / keybinding overview
+  - q: quit
 
-When the UI opens it automatically expands the root plus two levels (root = level 0) so you can scan the outline immediately. Press `l` and enter a digit to focus on a shallower/deeper slice, or hit `a` to view the entire selected branch.
+## Architecture Overview
 
-## Key bindings
+- `node_models.py`
+  - Defines `MindmapNode` (title, body, children, kind, list_marker).
+  - Serves as the structural backbone between TUI, parser, and exporter.
+- `md_io.py`
+  - Parses headings + lists into a `MindmapNode` tree (`from_markdown`).
+  - Serializes the tree to canonical Markdown (`to_markdown`) using the rules above.
+- `ai.py`
+  - Wraps OpenRouter calls and offline fallbacks.
+  - Structured prompts for subtree generation, leaf bodies, emojis.
+  - Logs prompts/responses to `prompt.log` and `connection.log`.
+- `app.py`
+  - Textual-based `MindmapApp`.
+  - Manages tree rendering, keyboard interactions, AI workflows, context, and preview.
+  - Ensures MindmapNode stays normalized so save/export is stable.
 
-| Key | Action |
-| --- | --- |
-| `a` | Expand fully entire tree (or branch) from focus |
-| `e` | Inline edit title or text line |
-| `tab` | Add manual child |
-| `n` | Add manual sibling at same level |
-| `m` | Choose the active OpenRouter model |
-| `f` | Full multi-level AI map generation (like `f8,4`) |
-| `1`–`9` | New 1-9 AI entries on selected node |
-| `?` | Let AI choose how many child nodes to add |
-| `+` / `-` | Add/remove one AI suggestion |
-| `t` | AI text for selected node |
-| `:` | AI powered emoji prefix for selected line |
-| `w` | Enter URL for simple RAG style knowledge add |
-| `i` | Edit the simple RAG style knowledge text |
-| `l` | Set visible level depth (press 2 for two levels) |
-| `o` | Open `mindmap.md` |
-| `s` | Save `mindmap.md` |
-| `0` | Delete everything under selected node (keep it), or clear focused text block |
-| `-` | Delete selected node and its subtree |
-| `Space` | Collapse / Expand |
-| `p` | View current mindmap and nodes state in Markmap |
-| `h` | Help showing key bindings (this screen) |
-| `q` | Quit |
+## Why use m1ndm4p?
 
-## Markmap integration
+- Think and design at the speed of the keyboard.
+- Start from scratch or from existing notes; keep everything as Markdown.
+- Explore new knowledge - type a subject in the root and let AI lay it out.
+- Let AI propose structure and text, but keep full control and visibility.
+- Present your maps interactively with Markmap.
+- Use simple text/URL context to guide AI to your domain.
 
-Press `p` (or select **Preview Markmap** from the footer hints) to regenerate `markmap_preview.html`. The app writes the current tree into that single HTML file, opens it in your default browser, and reuses the same file for future previews so you can refresh the tab to see updates. The output uses the [markmap](https://markmap.js.org/) library, so you get collapsible branches, zoom, and search without leaving the terminal workflow.
-Branches you collapse inside the TUI are still embedded in the preview—they simply start folded, so you can expand them in the browser when you need the hidden details.
-
-## Logs
-
-- `prompt.log`: timestamped prompt/response pairs for every AI call
-- `connection.log`: success/failure entries for each OpenRouter request
-
-Both logs reset on startup.
-
-## Best practices
-
-1. **Design the skeleton first.** Sketch the top level by hand (`tab` + `e`), then hand the branch to AI so the outline stays aligned with your intent.
-2. **Use structured full builds.** `f` + counts (e.g., `6,4,2`) gives you a predictable footprint. Rerun `f` on any branch to iterate rapidly.
-3. **Layer context intentionally.** Paste external notes with `i`/`w` before triggering AI so subtree generations remain grounded in the facts you care about.
-4. **Annotate in batches.** Press `t` on any branch to fill every leaf with a single batched request—faster, cheaper, and stylistically consistent.
-5. **Audit as you go.** Collapse/expand views with `l` (per branch) and `a` so you can spot redundant headings or shallow spots before regenerating.
-6. **Commit frequently.** `s` writes `mindmap.md`; `prompt.log` and `connection.log` are rotated on startup, so use them for learning but rely on Git for lasting history.
-
-## Troubleshooting
-
-- **AI unavailable?** Without `OPENROUTER_API_KEY`, the app falls back to deterministic dummy output; set the key or switch models via `m`.
-- **Structure feels flat?** Rerun `f` with explicit counts (e.g., `8,5`) or toggle text mode (`t`) to force deeper groupings and accompanying summaries.
-- **Text landed on the wrong level?** Remember sentences only appear on leaves—delete or add children, then hit `t` again to refresh only the necessary nodes.
-- **Prompt budget exploding?** Batch leaf generation (`t` on a branch) and leverage full builds instead of per-node requests; logs (`prompt.log`) show exactly what ran.
-- **UI quirks?** Ensure you’re inside a Unicode-capable terminal and that `textual`/`rich` are installed in the active virtual environment.
-
-Launch `python app.py`, keep iterating on `mindmap.md`, and let AI assist without taking control.
+Map out your own ideas or digest new content in an easy, inspectable, version-control-friendly way.
