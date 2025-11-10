@@ -269,6 +269,7 @@ def _structured_prompt(
     exact_children: int | None,
     context_markdown: str | None,
     level_targets: list[int] | None = None,
+    body_max_chars: int | None = None,
 ) -> str:
     normalized_context = _normalize_context_text(context_markdown)
     context_block = f"\n\nKnown outline:\n{normalized_context}" if normalized_context else ""
@@ -303,11 +304,27 @@ def _structured_prompt(
         )
 
     if include_body:
-        body_instruction = (
-            "Only add sentences to leaf headings (those you do not expand further). For each leaf, add exactly one plain declarative sentence "
-            "(≤160 characters) immediately below it, separated by a blank line. Never place a sentence under a heading that still receives child headings. "
-            "Keep sentences factual—no hype, lists, or markdown embellishments."
-        )
+        if mode == "body":
+            # Node-level body generation (used by 't' in the TUI).
+            limit = max(body_max_chars or 160, 160)
+            low = max(limit - 20, int(limit * 0.7))
+            high = limit
+            # Encourage using a narrow band near the tier limit and finishing sentences.
+            body_instruction = (
+                "Write a single, self-contained plain text explanation for the current node only. "
+                f"Aim for a length between {low} and {high} characters. "
+                "Prefer 2–5 compact sentences forming one cohesive paragraph. "
+                "Always end with a complete sentence; never cut off mid-sentence or mid-word. "
+                "Be rich, specific, and information-dense without fluff. "
+                "Do not include headings, lists, markdown formatting, bullet points, numbered items, or meta-commentary. "
+                "Do not explain these instructions or mention character counts."
+            )
+        else:
+            body_instruction = (
+                "Only add sentences to leaf headings (those you do not expand further). For each leaf, add exactly one plain declarative sentence "
+                "(≤160 characters) immediately below it, separated by a blank line. Never place a sentence under a heading that still receives child headings. "
+                "Keep sentences factual—no hype, lists, or markdown embellishments."
+            )
     else:
         body_instruction = "Do not include any narrative paragraphs or bullet lists—headings only."
 
@@ -416,6 +433,7 @@ def generate_structured_subtree(
     mode: Literal["auto", "exact", "body"] = "auto",
     exact_children: int | None = None,
     level_targets: list[int] | None = None,
+    body_max_chars: int | None = None,
 ) -> Optional[str]:
     if not node_path:
         raise ValueError("node_path must contain at least one title")
@@ -440,6 +458,7 @@ def generate_structured_subtree(
         exact_children=exact_children,
         context_markdown=context_markdown,
         level_targets=level_targets,
+        body_max_chars=body_max_chars,
     )
     if not uses_network:
         return _dummy_subtree_markdown(

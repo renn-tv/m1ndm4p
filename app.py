@@ -2568,21 +2568,114 @@ class MindmapApp(App[None]):
             self._restore_expand_state(expand_state)
 
     async def action_generate_body(self) -> None:
+        """Generate or rewrite node body text within a dynamic character budget.
+
+        Behavior:
+        - If the node has no body: generate a concise explanation (up to 160 chars).
+        - If the node already has body text: rewrite it fully with an expanded budget (up to 320 chars).
+        In both cases the result replaces the existing body; no incremental appends.
+        """
         selected_tree_node = self.get_selected_tree_node()
         if selected_tree_node is None or selected_tree_node.data is None:
             self.bell()
             self.show_status("No node selected.")
             return
+
         model_node = selected_tree_node.data
         if not isinstance(model_node, MindmapNode):
             self.bell()
             self.show_status("Cannot annotate this entry.")
             return
+
+        # If this node has children, keep existing multi-node behavior:
+        # use `t` as "generate leaf text" for the subtree.
         if model_node.children:
             await self._generate_text_for_leaves(selected_tree_node)
             return
-        with self._prompt_log_session("Generate body text"):
-            await self._generate_body_for_node(selected_tree_node, model_node)
+
+        # Leaf node: treat `t` as a bounded rewrite within an increasing character budget.
+        # Tiered behavior:
+        # - If there is no body yet: generate up to 160 chars.
+        # - If body length ≤ 160: rewrite up to 320 chars.
+        # - If body length ≤ 320: rewrite up to 480 chars.
+        # - If body length ≤ 480: rewrite up to 640 chars.
+        # - If body length ≤ 640: rewrite up to 800 chars.
+        # - If body length > 640: keep rewriting within 800 chars (idempotent upper tier).
+        existing = (model_node.body or "").strip()
+        existing_len = len(existing)
+        if not existing_len:
+            max_chars = 160
+        elif existing_len <= 160:
+            max_chars = 320
+        elif existing_len <= 320:
+            max_chars = 480
+        elif existing_len <= 480:
+            max_chars = 640
+        elif existing_len <= 640:
+            max_chars = 800
+        else:
+            max_chars = 800
+
+        node_path = self._node_path(selected_tree_node)
+        context = self._contextual_markdown()
+
+        with self._prompt_log_session(f"Generate body text (max {max_chars} chars)"):
+            markdown = await self._call_ai_with_spinner(
+                selected_tree_node,
+                "generate body text",
+                ai.generate_structured_subtree,
+                node_path,
+                0,
+                context_markdown=context,
+                include_body=True,
+                mode="body",
+                body_max_chars=max_chars,
+            )
+
+        if not isinstance(markdown, str):
+            self.show_status("No text returned.")
+            return
+        cleaned = markdown.strip()
+        if not cleaned:
+            self.show_status("No text returned.")
+            return
+
+        # Parse using existing Markdown-to-node pipeline.
+        snippet = cleaned if cleaned.endswith("\n") else f"{cleaned}\n"
+        try:
+            generated_root = from_markdown(snippet)
+        except ValueError:
+            # Fallback: treat raw text as body.
+            body_text = cleaned
+        else:
+            body_text = (generated_root.body or "").strip() or cleaned
+
+        # Normalize whitespace.
+        compact = " ".join(body_text.split())
+
+        if not compact:
+            self.show_status("Generated text was empty after normalization.")
+            return
+
+        # Enforce hard upper bound but avoid cutting mid-sentence:
+        # - If text is within limit, keep as-is.
+        # - If it exceeds, trim to max_chars then roll back to last sentence end.
+        if len(compact) > max_chars:
+            slice_ = compact[:max_chars]
+            # Prefer the last strong sentence terminator within the slice.
+            cut = max(slice_.rfind("."), slice_.rfind("!"), slice_.rfind("?"))
+            if cut != -1 and cut >= int(max_chars * 0.5):
+                compact = slice_[: cut + 1].rstrip()
+            else:
+                # Fallback: hard cap, but avoid trailing partial word.
+                compact = slice_.rsplit(" ", 1)[0].rstrip() if " " in slice_ else slice_.rstrip()
+
+        model_node.body = compact
+        self.populate_tree(selected_tree_node, model_node)
+        self._select_tree_node_without_toggle(selected_tree_node)
+        self.require_tree().refresh(layout=True)
+        status_label = "created" if not existing_len else "rewritten"
+        self.show_status(f"Body {status_label} (≤{max_chars} chars).")
 
     async def on_event(self, event: events.Event) -> None:  # noqa: D401
         if isinstance(event, events.Key):

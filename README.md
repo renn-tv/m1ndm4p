@@ -103,7 +103,7 @@ By default, save writes to `mindmap.md` in the repo root (or back to the opened 
   - ?: auto-select how many child nodes to add
   - +: add one more AI suggestion child under current node
   - f: full multi-level AI build (guided counts)
-  - t: generate body text
+  - t: generate and refine body text (repeated presses expand detail)
   - : (colon): suggest an emoji prefix
 - Context & Web:
   - i: edit simple text context (RAG-style)
