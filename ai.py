@@ -36,6 +36,7 @@ _NETWORK_MODELS = [
     "qwen/qwen3-coder:free",
     "tngtech/deepseek-r1t2-chimera:free",
     "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+    "x-ai/grok-4.1-fast:free",
     "z-ai/glm-4.5-air:free",
 ]
 AVAILABLE_MODELS = [OFFLINE_MODEL, *_NETWORK_MODELS]

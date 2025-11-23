@@ -298,12 +298,14 @@ class ContextEditorScreen(ModalScreen[dict[str, str] | None]):
         self._initial_text = initial_text
 
     def compose(self) -> ComposeResult:
-        yield ContextTextArea(
+        textarea = ContextTextArea(
             text=self._initial_text,
             id="context-editor-text",
-            placeholder="Paste or edit reference text to guide AI responses…",
             soft_wrap=True,
         )
+        if hasattr(textarea, "placeholder"):
+            textarea.placeholder = "Paste or edit reference text to guide AI responses…"
+        yield textarea
 
     def on_mount(self) -> None:
         textarea = self.query_one("#context-editor-text", ContextTextArea)
