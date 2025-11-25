@@ -29,6 +29,11 @@ from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.widgets._tree import TextType, TreeNode, UnknownNodeID
 from rich.text import Text
 
+try:
+    from textual.theme import ThemeProvider
+except ModuleNotFoundError:  # Older Textual without theme provider
+    ThemeProvider = None
+
 from md_io import from_markdown, to_markdown
 from node_models import MindmapNode
 import ai
@@ -486,6 +491,7 @@ class MindmapApp(App[None]):
 
     TITLE = "m1ndm4p"
     BODY_WRAP_WIDTH = 40
+    COMMANDS = App.COMMANDS | ({ThemeProvider} if ThemeProvider else set())
 
     CSS = """
     #mindmap-tree {
@@ -523,6 +529,7 @@ class MindmapApp(App[None]):
         Binding(":", "add_emoji", "Emoji"),
         Binding("m", "choose_model", "Model"),
         Binding("p", "preview_markmap", "Markmap"),
+        Binding("ctrl+p", "command_palette", "Palette", priority=True),
         Binding("1", "generate_children(1)", "(AI nodes)", key_display="1-9"),
         Binding("?", "auto_generate_children", "(AI auto)"),
     ] + [

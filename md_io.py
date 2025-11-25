@@ -282,6 +282,28 @@ def from_markdown(md: str) -> MindmapNode:
             list_stack.append((indent, list_node))
             i += 1
 
+            # Capture indented body lines that belong to this list item.
+            body_lines: List[str] = []
+            while i < len(lines):
+                current = lines[i]
+                # Stop if we hit another list item or a heading.
+                if _match_list_item(current) or _HEADING_PATTERN.match(current):
+                    break
+                # Stop if indentation decreases below the bullet's indent.
+                if len(current) - len(current.lstrip(" ")) < indent:
+                    break
+                if current.strip() == "":
+                    if body_lines:
+                        i += 1
+                        break
+                    i += 1
+                    continue
+                body_lines.append(_strip_body_line_prefix(current))
+                i += 1
+
+            if body_lines:
+                list_node.body = "\n".join(body_lines).strip()
+
         while i < len(lines) and lines[i].strip() == "":
             i += 1
 

@@ -11,7 +11,7 @@ from urllib import error, request
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 OFFLINE_MODEL = "No AI (offline dummy output)"
 _NETWORK_MODELS = [
-    "openrouter/polaris-alpha",
+    "openrouter/bert-nebulon-alpha",
     "alibaba/tongyi-deepresearch-30b-a3b:free",
     "deepseek/deepseek-r1-0528-qwen3-8b:free",
     "google/gemini-2.0-flash-exp:free",
